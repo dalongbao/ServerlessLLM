@@ -23,7 +23,7 @@ import uuid
 from typing import Optional, Union
 
 import torch
-from accelerate import dispatch_model, init_empty_weights
+from accelerate import dispatch_model, init_empty_weights, infer_auto_device_map
 
 # from accelerate.hooks import add_hook_to_module
 from accelerate.utils import set_module_tensor_to_device
@@ -252,6 +252,8 @@ def fully_parallel_load(
             model = replace_with_bnb_linear(
                 model, quantization_config=quantization_config
             )
+
+            device_map = infer_auto_device_map(model)
 
             for name, param in state_dict.items():
                 if (
