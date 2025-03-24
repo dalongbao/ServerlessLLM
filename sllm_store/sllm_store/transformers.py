@@ -26,7 +26,7 @@ import torch
 from accelerate import dispatch_model, init_empty_weights
 
 # from accelerate.hooks import add_hook_to_module
-from accelerate.utils import set_module_tensor_to_device
+from accelerate.utils import set_module_tensor_to_device, infer_auto_device_map
 from sllm_store._C import (
     allocate_cuda_memory,
     get_cuda_memory_handles,
