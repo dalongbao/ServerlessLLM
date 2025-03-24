@@ -243,6 +243,8 @@ def fully_parallel_load(
                 set_module_quantized_tensor_to_device(
                     model, name, param.device, param
                 )
+
+            device_map = infer_auto_device_map(model)
         else:
             if quantization_config is not None:
                 logger.debug(
