@@ -232,6 +232,7 @@ def fully_parallel_load(
             model = replace_with_bnb_linear(
                 model, quantization_config=quantization_config
             )
+            model.tie_weights()
 
             for name, param in state_dict.items():
                 if (
