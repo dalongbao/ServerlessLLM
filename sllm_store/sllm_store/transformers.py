@@ -245,6 +245,7 @@ def fully_parallel_load(
                     model, name, param.device, param
                 )
 
+            model.tie_weights()
             device_map = infer_auto_device_map(model)
         else:
             if quantization_config is not None:
