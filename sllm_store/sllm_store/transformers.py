@@ -53,11 +53,6 @@ from sllm_store.utils import (
 )
 from torch import nn
 from transformers import AutoConfig
-from transformers.integrations.bitsandbytes import (
-    set_module_quantized_tensor_to_device,
-    replace_with_bnb_linear,
-)
-from transformers.modeling_utils import _get_device_map
 import importlib
 from peft import PeftModel, get_peft_model_state_dict, PeftConfig
 
@@ -251,15 +246,10 @@ def fully_parallel_load(
                     )
                     state_dict[name] = param
 
+            model.hf_quantizer = hf_quantizer
             model.tie_weights()
             hf_quantizer.postprocess_model(model)
-            device_map = _get_device_map(
-                model=model,
-                device_map=device_map,
-                hf_quantizer=hf_quantizer,
-                torch_dtype=torch_dtype,
-            )
-            model.hf_quantizer = hf_quantizer
+            device_map = infer_auto_device_map(model)
 
         else:
             if quantization_config is not None:
