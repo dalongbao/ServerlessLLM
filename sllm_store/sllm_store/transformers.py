@@ -23,7 +23,7 @@ import uuid
 from typing import Optional, Union
 
 import torch
-from accelerate import dispatch_model, init_empty_weights
+from accelerate import dispatch_model, init_empty_weights, infer_auto_device_map
 
 # from accelerate.hooks import add_hook_to_module
 from accelerate.utils import set_module_tensor_to_device
@@ -53,6 +53,10 @@ from sllm_store.utils import (
 )
 from torch import nn
 from transformers import AutoConfig
+from transformers.integrations.bitsandbytes import (
+    set_module_quantized_tensor_to_device,
+    replace_with_bnb_linear,
+)
 import importlib
 from peft import PeftModel, get_peft_model_state_dict, PeftConfig
 
