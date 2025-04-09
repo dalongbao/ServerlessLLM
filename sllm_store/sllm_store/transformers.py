@@ -231,8 +231,10 @@ def fully_parallel_load(
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
             hf_quantizer = get_quantizer(quantization_config)
+            torch_dtype = hf_quantizer.update_torch_dtype(
+                torch_dtype or torch.float16
+            )
             hf_quantizer.preprocess_model(model=model, device_map=device_map)
-            torch_dtype = hf_quantizer.update_torch_dtype(torch_dtype)
 
             for name, param in state_dict.items():
                 if param.dtype in [torch.uint8, torch.int8]:
@@ -244,16 +246,15 @@ def fully_parallel_load(
                         state_dict=state_dict,
                     )
                 else:
-                    param = param.to(torch_dtype or torch.float16)
+                    param = param.to(torch_dtype)
                     set_module_tensor_to_device(
                         model, name, param.device, param
                     )
                     state_dict[name] = param
 
             model.hf_quantizer = hf_quantizer
-            model.tie_weights()
             hf_quantizer.postprocess_model(model)
-            device_map = infer_auto_device_map(model)
+            device_map = infer_auto_device_map(model, dtype=torch_dtype)
 
         else:
             if quantization_config is not None:
@@ -273,8 +274,8 @@ def fully_parallel_load(
     client = SllmStoreClient("127.0.0.1:8073")
     client.confirm_model_loaded(model_path, replica_uuid)
     model.eval()
-    model.hf_device_map = device_map
-
+    model.hf_device_map = model.hf_device_map or device_map
+    model.tie_weights()
     return model
 
 
