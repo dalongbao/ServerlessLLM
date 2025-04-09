@@ -234,14 +234,7 @@ def fully_parallel_load(
             quantizer._process_model_before_weight_loading(model, device_map)
 
             for name, param in state_dict.items():
-                if (
-                    param.dtype not in [torch.uint8, torch.int8]
-                    and torch_dtype is None
-                ):
-                    param = param.to(torch_dtype or torch.float16)
-                    state_dict[name] = param
-
-                else:
+                if param.dtype in [torch.uint8, torch.int8]:
                     quantizer.create_quantized_param(
                         model=model,
                         param_value=param,
@@ -249,6 +242,9 @@ def fully_parallel_load(
                         target_device=torch.device(param.device),
                         state_dict=state_dict,
                     )
+                else:
+                    param = param.to(torch_dtype or torch.float16)
+                    state_dict[name] = param
 
             quantizer._process_model_after_weight_loading(model)
             device_map = infer_auto_device_map(model)
