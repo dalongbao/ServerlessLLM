@@ -26,7 +26,7 @@ import torch
 from accelerate import dispatch_model, init_empty_weights
 
 # from accelerate.hooks import add_hook_to_module
-from accelerate.utils import set_module_tensor_to_device, infer_auto_device_map
+from accelerate.utils import set_module_tensor_to_device
 from sllm_store._C import (
     allocate_cuda_memory,
     get_cuda_memory_handles,
@@ -57,6 +57,7 @@ from transformers.integrations.bitsandbytes import (
     set_module_quantized_tensor_to_device,
     replace_with_bnb_linear,
 )
+from transformers.modeling_utils import _get_device_map
 import importlib
 from peft import PeftModel, get_peft_model_state_dict, PeftConfig
 
@@ -230,12 +231,13 @@ def fully_parallel_load(
                 logger.debug("Offloading is not supported yet")
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
-            quantizer = get_quantizer(quantization_config)
-            quantizer._process_model_before_weight_loading(model, device_map)
+            hf_quantizer = get_quantizer(quantization_config)
+            hf_quantizer.preprocess_model(model=model, device_map=device_map)
+            torch_dtype = hf_quantizer.update_torch_dtype(torch_dtype)
 
             for name, param in state_dict.items():
                 if param.dtype in [torch.uint8, torch.int8]:
-                    quantizer.create_quantized_param(
+                    hf_quantizer.create_quantized_param(
                         model=model,
                         param_value=param,
                         param_name=name,
@@ -244,11 +246,20 @@ def fully_parallel_load(
                     )
                 else:
                     param = param.to(torch_dtype or torch.float16)
-                    set_module_tensor_to_device(model, name, param.device, param)
+                    set_module_tensor_to_device(
+                        model, name, param.device, param
+                    )
                     state_dict[name] = param
 
-            quantizer._process_model_after_weight_loading(model)
-            device_map = infer_auto_device_map(model)
+            model.tie_weights()
+            hf_quantizer.postprocess_model(model)
+            device_map = _get_device_map(
+                model=model,
+                device_map=device_map,
+                hf_quantizer=hf_quantizer,
+                torch_dtype=torch_dtype,
+            )
+            model.hf_quantizer = hf_quantizer
 
         else:
             if quantization_config is not None:
