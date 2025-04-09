@@ -240,6 +240,7 @@ def fully_parallel_load(
                 ):
                     param = param.to(torch_dtype or torch.float16)
 
+                print(type(param))
                 quantizer.create_quantized_param(
                     model=model,
                     param_value=param,
