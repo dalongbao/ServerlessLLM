@@ -49,6 +49,7 @@ from sllm_store.utils import (
     get_no_split_modules,
     get_tied_no_split_modules,
     send_module_buffers_to_device,
+    get_quantizer,
 )
 from torch import nn
 from transformers import AutoConfig
@@ -229,24 +230,27 @@ def fully_parallel_load(
                 logger.debug("Offloading is not supported yet")
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
-            model = replace_with_bnb_linear(
-                model, quantization_config=quantization_config
-            )
-            model.tie_weights()
+            quantizer = get_quantizer(quantization_config)
+            quantizer._process_model_before_weight_loading(model, device_map)
 
             for name, param in state_dict.items():
                 if (
                     param.dtype not in [torch.uint8, torch.int8]
                     and torch_dtype is None
                 ):
-                    param = param.to(torch.float16)
+                    param = param.to(torch_dtype or torch.float16)
 
-                set_module_quantized_tensor_to_device(
-                    model, name, param.device, param
+                quantizer.create_quantized_param(
+                    model=model,
+                    param_value=param,
+                    param_name=name,
+                    target_device=torch.device(param.device),
+                    state_dict=state_dict,
                 )
 
-            model.tie_weights()
+            quantizer._process_model_after_weight_loading(model)
             device_map = infer_auto_device_map(model)
+
         else:
             if quantization_config is not None:
                 logger.debug(
@@ -255,6 +259,7 @@ def fully_parallel_load(
 
             for name, param in state_dict.items():
                 set_module_tensor_to_device(model, name, param.device, param)
+
         send_module_buffers_to_device(model, device_map)
 
     dispatch_model(

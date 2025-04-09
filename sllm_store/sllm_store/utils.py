@@ -22,6 +22,10 @@ from accelerate.utils import find_tied_parameters
 from torch import nn
 import re
 
+from transformers import BitsAndBytesConfig
+from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
+from transformers.quantizers.quantizer_bnb_8bit import Bnb8BitHfQuantizer
+
 
 def set_module_buffer_to_device(
     module: nn.Module,
@@ -238,3 +242,9 @@ def to_num_bytes(value: str) -> int:
 
     bytes_value = number * unit_multipliers[unit]
     return bytes_value
+
+
+def get_quantizer(quantization_config: BitsAndBytesConfig):
+    if quantization_config.load_in_8bit:
+        return Bnb8BitHfQuantizer(quantization_config)
+    return Bnb4BitHfQuantizer(quantization_config)
