@@ -244,6 +244,7 @@ def fully_parallel_load(
                     )
                 else:
                     param = param.to(torch_dtype or torch.float16)
+                    set_module_tensor_to_device(model, name, param.device, param)
                     state_dict[name] = param
 
             quantizer._process_model_after_weight_loading(model)
