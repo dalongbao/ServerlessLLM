@@ -240,7 +240,6 @@ def fully_parallel_load(
                 quantization_config=quantization_config,
                 modules_to_not_convert=quantization_config.skip_modules,
             )
-            model.tie_weights()
 
             for name, param in state_dict.items():
                 if param.dtype in [torch.uint8, torch.int8]:
@@ -250,8 +249,6 @@ def fully_parallel_load(
                 else:
                     param = param.to(torch_dtype)
                     set_module_tensor_to_device(model, name, param.device, param)
-
-            model.tie_weights()
 
         else:
             if quantization_config is not None:
