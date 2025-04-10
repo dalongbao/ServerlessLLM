@@ -241,7 +241,7 @@ def fully_parallel_load(
 
             model = replace_with_bnb_layers(
                 model,
-                quantization_config=quantization_config,
+                bnb_quantization_config=quantization_config,
                 modules_to_not_convert=quantization_config.skip_modules,
             )
             model.is_loaded_in_8bit = quantization_config.load_in_8bit
