@@ -23,10 +23,15 @@ import uuid
 from typing import Optional, Union
 
 import torch
-from accelerate import dispatch_model, init_empty_weights, infer_auto_device_map
+from accelerate import dispatch_model, init_empty_weights
 
 # from accelerate.hooks import add_hook_to_module
-from accelerate.utils import set_module_tensor_to_device
+from accelerate.utils import (
+    set_module_tensor_to_device,
+    get_quantized_model_device_map,
+    replace_with_bnb_layers,
+    get_keys_to_not_convert,
+)
 from sllm_store._C import (
     allocate_cuda_memory,
     get_cuda_memory_handles,
@@ -49,7 +54,6 @@ from sllm_store.utils import (
     get_no_split_modules,
     get_tied_no_split_modules,
     send_module_buffers_to_device,
-    get_quantizer,
 )
 from torch import nn
 from transformers import AutoConfig
@@ -231,22 +235,29 @@ def fully_parallel_load(
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
             torch_dtype = torch_dtype or torch.float16
-            model = replace_with_bnb_linear(
-                model, quantization_config=quantization_config
+            quantization_config.skip_modules = get_keys_to_not_convert(model)
+
+            model = replace_with_bnb_layers(
+                model,
+                quantization_config=quantization_config,
+                modules_to_not_convert=quantization_config.skip_modules,
             )
-            model.tie_weights()
+            model.is_loaded_in_8bit = quantization_config.load_in_8bit
+            model.is_loaded_in_4bit = quantization_config.load_in_4bit
+
+            device_map = get_quantized_model_device_map(
+                model,
+                quantization_config,
+                device_map=device_map,
+            )
 
             for name, param in state_dict.items():
-                if (param.dtype in [torch.uint8, torch.int8]):
-                    set_module_quantized_tensor_to_device(
-                        model, name, torch.device("cpu"), param.to("cpu")
-                    )
-                else:
+                if param.dtype not in [torch.uint8, torch.int8]:
                     param = param.to(torch_dtype)
-                    set_module_tensor_to_device(model, name, param.device, param)
 
-            device_map = infer_auto_device_map(model)
-
+                set_module_quantized_tensor_to_device(
+                    model, name, param.device, param
+                )
         else:
             if quantization_config is not None:
                 logger.debug(
