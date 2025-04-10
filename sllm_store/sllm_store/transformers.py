@@ -29,9 +29,6 @@ from accelerate import dispatch_model, init_empty_weights
 from accelerate.utils import (
     set_module_tensor_to_device,
 )
-from accelerate.utils.bnb import (
-    get_keys_to_not_convert,
-)
 from sllm_store._C import (
     allocate_cuda_memory,
     get_cuda_memory_handles,
@@ -60,6 +57,7 @@ from transformers import AutoConfig
 from transformers.integrations.bitsandbytes import (
     set_module_quantized_tensor_to_device,
     replace_with_bnb_linear,
+    get_keys_to_not_convert,
 )
 import importlib
 from peft import PeftModel, get_peft_model_state_dict, PeftConfig
@@ -242,14 +240,19 @@ def fully_parallel_load(
                 quantization_config=quantization_config,
                 modules_to_not_convert=quantization_config.skip_modules,
             )
+            model.tie_weights()
 
             for name, param in state_dict.items():
-                if param.dtype not in [torch.uint8, torch.int8]:
+                if param.dtype in [torch.uint8, torch.int8]:
+                    set_module_quantized_tensor_to_device(
+                        model, name, param.device, param
+                    )
+                else:
                     param = param.to(torch_dtype)
+                    set_module_tensor_to_device(model, name, param.device, param)
 
-                set_module_quantized_tensor_to_device(
-                    model, name, param.device, param
-                )
+            model.tie_weights()
+
         else:
             if quantization_config is not None:
                 logger.debug(
