@@ -30,8 +30,6 @@ from accelerate.utils import (
     set_module_tensor_to_device,
 )
 from accelerate.utils.bnb import (
-    get_quantized_model_device_map,
-    replace_with_bnb_layers,
     get_keys_to_not_convert,
 )
 from sllm_store._C import (
@@ -246,12 +244,6 @@ def fully_parallel_load(
             )
             model.is_loaded_in_8bit = quantization_config.load_in_8bit
             model.is_loaded_in_4bit = quantization_config.load_in_4bit
-
-            device_map = get_quantized_model_device_map(
-                model,
-                quantization_config,
-                device_map=device_map,
-            )
 
             for name, param in state_dict.items():
                 if param.dtype not in [torch.uint8, torch.int8]:
