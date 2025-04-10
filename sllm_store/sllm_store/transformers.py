@@ -230,12 +230,27 @@ def fully_parallel_load(
                 logger.debug("Offloading is not supported yet")
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
+            torch_dtype = torch_dtype or torch.float16
             hf_quantizer = get_quantizer(quantization_config)
             hf_quantizer.validate_environment(device_map)
             device_map = hf_quantizer.update_device_map(device_map)
             hf_quantizer._process_model_before_weight_loading(model, device_map)
-            model.load_state_dict(state_dict, strict=False)
-            hf_quantizer._process_model_before_weight_loading(model)
+
+            for name, param in state_dict.items():
+                target_device = device_map.get(name, "cuda")
+                if hf_quantizer.check_quantized_param(model, param, name, state_dict):
+                    hf_quantizer.create_quantized_param(
+                        model, 
+                        param.to("cpu"), 
+                        name, 
+                        target_device=target_device,
+                        state_dict=state_dict,
+                    )
+                else:
+                    param = param.to(torch_dtype)
+                    set_module_tensor_to_device(model, name, target_device, param)
+
+            hf_quantizer._process_model_after_weight_loading(model)
 
         else:
             if quantization_config is not None:
