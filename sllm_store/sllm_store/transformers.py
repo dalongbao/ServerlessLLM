@@ -242,8 +242,6 @@ def fully_parallel_load(
                 quantization_config=quantization_config,
                 modules_to_not_convert=quantization_config.skip_modules,
             )
-            model.is_loaded_in_8bit = quantization_config.load_in_8bit
-            model.is_loaded_in_4bit = quantization_config.load_in_4bit
 
             for name, param in state_dict.items():
                 if param.dtype not in [torch.uint8, torch.int8]:
