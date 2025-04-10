@@ -28,6 +28,8 @@ from accelerate import dispatch_model, init_empty_weights
 # from accelerate.hooks import add_hook_to_module
 from accelerate.utils import (
     set_module_tensor_to_device,
+)
+from accelerate.utils.bnb import (
     get_quantized_model_device_map,
     replace_with_bnb_layers,
     get_keys_to_not_convert,
