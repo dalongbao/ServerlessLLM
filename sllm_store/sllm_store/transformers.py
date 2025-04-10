@@ -239,9 +239,9 @@ def fully_parallel_load(
             torch_dtype = torch_dtype or torch.float16
             quantization_config.skip_modules = get_keys_to_not_convert(model)
 
-            model = replace_with_bnb_layers(
+            model = replace_with_bnb_linear(
                 model,
-                bnb_quantization_config=quantization_config,
+                quantization_config=quantization_config,
                 modules_to_not_convert=quantization_config.skip_modules,
             )
             model.is_loaded_in_8bit = quantization_config.load_in_8bit
