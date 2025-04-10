@@ -214,7 +214,7 @@ def fully_parallel_load(
         replica_uuid, state_dict = future.result()
 
     with torch.no_grad():
-        if quantization_config is not None and torch.cuda.is_available():
+        if quantization_config and torch.cuda.is_available():
             from transformers import BitsAndBytesConfig
 
             if not isinstance(quantization_config, BitsAndBytesConfig):
@@ -231,26 +231,20 @@ def fully_parallel_load(
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
             torch_dtype = torch_dtype or torch.float16
-            hf_quantizer = get_quantizer(quantization_config)
-            hf_quantizer.validate_environment(device_map)
-            device_map = hf_quantizer.update_device_map(device_map)
-            hf_quantizer._process_model_before_weight_loading(model, device_map)
+            model = replace_with_bnb_linear(
+                model, quantization_config=quantization_config
+            )
+            model.tie_weights()
+            device_map = infer_auto_device_map(model)
 
             for name, param in state_dict.items():
-                target_device = device_map.get(name, "cuda")
-                if hf_quantizer.check_quantized_param(model, param, name, state_dict):
-                    hf_quantizer.create_quantized_param(
-                        model, 
-                        param.to("cpu"), 
-                        name, 
-                        target_device=target_device,
-                        state_dict=state_dict,
+                if (param.dtype in [torch.uint8, torch.int8]):
+                    set_module_quantized_tensor_to_device(
+                        model, name, torch.device("cpu"), param.to("cpu")
                     )
                 else:
                     param = param.to(torch_dtype)
-                    set_module_tensor_to_device(model, name, target_device, param)
-
-            hf_quantizer._process_model_after_weight_loading(model)
+                    set_module_tensor_to_device(model, name, param.device, param)
 
         else:
             if quantization_config is not None:
