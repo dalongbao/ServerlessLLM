@@ -235,7 +235,6 @@ def fully_parallel_load(
                 model, quantization_config=quantization_config
             )
             model.tie_weights()
-            device_map = infer_auto_device_map(model)
 
             for name, param in state_dict.items():
                 if (param.dtype in [torch.uint8, torch.int8]):
@@ -245,6 +244,8 @@ def fully_parallel_load(
                 else:
                     param = param.to(torch_dtype)
                     set_module_tensor_to_device(model, name, param.device, param)
+
+            device_map = infer_auto_device_map(model)
 
         else:
             if quantization_config is not None:
