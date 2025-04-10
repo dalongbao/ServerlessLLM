@@ -214,7 +214,7 @@ def fully_parallel_load(
         replica_uuid, state_dict = future.result()
 
     with torch.no_grad():
-        if quantization_config and torch.cuda.is_available():
+        if quantization_config is not None and torch.cuda.is_available():
             from transformers import BitsAndBytesConfig
 
             if not isinstance(quantization_config, BitsAndBytesConfig):
@@ -231,30 +231,11 @@ def fully_parallel_load(
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
             hf_quantizer = get_quantizer(quantization_config)
-            torch_dtype = hf_quantizer.update_torch_dtype(
-                torch_dtype or torch.float16
-            )
-            hf_quantizer.preprocess_model(model=model, device_map=device_map)
-
-            for name, param in state_dict.items():
-                if param.dtype in [torch.uint8, torch.int8]:
-                    hf_quantizer.create_quantized_param(
-                        model=model,
-                        param_value=param,
-                        param_name=name,
-                        target_device=torch.device(param.device),
-                        state_dict=state_dict,
-                    )
-                else:
-                    param = param.to(torch_dtype)
-                    set_module_tensor_to_device(
-                        model, name, param.device, param
-                    )
-                    state_dict[name] = param
-
-            model.hf_quantizer = hf_quantizer
-            hf_quantizer.postprocess_model(model)
-            device_map = infer_auto_device_map(model, dtype=torch_dtype)
+            hf_quantizer.validate_environment(device_map)
+            device_map = hf_quantizer.update_device_map(device_map)
+            hf_quantizer._process_model_before_weight_loading(model, device_map)
+            model.load_state_dict(state_dict, strict=False)
+            hf_quantizer._process_model_before_weight_loading(model)
 
         else:
             if quantization_config is not None:
@@ -274,8 +255,6 @@ def fully_parallel_load(
     client = SllmStoreClient("127.0.0.1:8073")
     client.confirm_model_loaded(model_path, replica_uuid)
     model.eval()
-    model.hf_device_map = model.hf_device_map or device_map
-    model.tie_weights()
     return model
 
 
