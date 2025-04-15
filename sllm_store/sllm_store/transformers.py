@@ -51,6 +51,7 @@ from sllm_store.utils import (
     get_no_split_modules,
     get_tied_no_split_modules,
     send_module_buffers_to_device,
+    get_hf_quantizer,
 )
 from torch import nn
 from transformers import AutoConfig
@@ -216,7 +217,7 @@ def fully_parallel_load(
         replica_uuid, state_dict = future.result()
 
     with torch.no_grad():
-        if quantization_config and torch.cuda.is_available():
+        if (quantization_config is not None) and torch.cuda.is_available():
             from transformers import BitsAndBytesConfig
 
             if not isinstance(quantization_config, BitsAndBytesConfig):
@@ -232,24 +233,29 @@ def fully_parallel_load(
                 logger.debug("Offloading is not supported yet")
                 quantization_config.llm_int8_enable_fp32_cpu_offload = False
 
-            torch_dtype = torch_dtype or torch.float16
             quantization_config.skip_modules = get_keys_to_not_convert(model)
-
-            model = replace_with_bnb_linear(
-                model,
-                quantization_config=quantization_config,
-                modules_to_not_convert=quantization_config.skip_modules,
+            hf_quantizer = get_hf_quantizer(quantization_config)
+            torch_dtype = hf_quantizer.update_torch_dtype(
+                torch_dtype or torch.float16
             )
+            device_map = hf_quantizer.update_device_map(device_map)
+            hf_quantizer.preprocess_model(model=model, device_map=device_map)
 
             for name, param in state_dict.items():
                 if param.dtype in [torch.uint8, torch.int8]:
                     set_module_quantized_tensor_to_device(
-                        model, name, param.device, param
+                        model, name, param.device, param.to("cpu")
                     )
                 else:
                     param = param.to(torch_dtype)
-                    set_module_tensor_to_device(model, name, param.device, param)
+                    set_module_tensor_to_device(
+                        model, name, param.device, param
+                    )
 
+            hf_quantizer.postprocess_model(model)
+            model.hf_quantizer = hf_quantizer
+            print(model.quantization_method)
+            print(model.is_loaded_in_8bit)
         else:
             if quantization_config is not None:
                 logger.debug(
