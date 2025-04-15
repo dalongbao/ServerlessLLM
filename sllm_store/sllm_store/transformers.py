@@ -274,6 +274,8 @@ def fully_parallel_load(
     client = SllmStoreClient("127.0.0.1:8073")
     client.confirm_model_loaded(model_path, replica_uuid)
     model.eval()
+    if quantization_config is not None:
+        model = model.to("cuda")
     return model
 
 
