@@ -41,6 +41,11 @@ class DeployCommand:
             "--config", type=str, help="Path to the JSON config file."
         )
         deploy_parser.add_argument(
+            "--quantization-config-path",
+            type=str,
+            help="Path to the JSON file containing the quantization config.",
+        )
+        deploy_parser.add_argument(
             "--backend",
             type=str,
             help="Overwrite the backend in the default configuration.",
@@ -70,6 +75,7 @@ class DeployCommand:
     def __init__(self, args: Namespace) -> None:
         self.model = args.model
         self.config_path = args.config
+        self.quantization_config_path = args.quantization_config_path
         self.backend = args.backend
         self.num_gpus = args.num_gpus
         self.target = args.target
@@ -138,6 +144,16 @@ class DeployCommand:
             config_data["backend_config"]["pretrained_model_name_or_path"] = (
                 self.model
             )
+            if self.quantization_config_path:
+                if self.backend != "transformers":
+                    logger.error(
+                        f"Quantization is only supported for the 'transformers' backend, but got backend='{self.backend}'. "
+                        "Please use the 'transformers' backend or disable quantization."
+                    )
+                else:
+                    config_data["quantization_config_path"] = (
+                        self.quantization_config_path
+                    )
             if self.backend:
                 config_data["backend"] = self.backend
             if self.num_gpus is not None:
