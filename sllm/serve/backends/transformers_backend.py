@@ -32,6 +32,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     PreTrainedTokenizerBase,
     Trainer,
     TrainingArguments,
@@ -115,6 +116,11 @@ class TransformersBackend(SllmBackend):
             torch_dtype = self.backend_config.get("torch_dtype", torch.float16)
             torch_dtype = getattr(torch, torch_dtype)
             hf_model_class = self.backend_config.get("hf_model_class", None)
+            quantization_config = None
+            quantization_config_path = self.backend_config.get(
+                "quantization_config_path"
+            )
+
             if torch_dtype is None:
                 logger.warning(
                     f"Invalid torch_dtype: {torch_dtype}. Using torch.float16"
@@ -127,6 +133,12 @@ class TransformersBackend(SllmBackend):
                 raise ValueError(
                     "hf_model_class cannot be None. Please provide a valid model class"
                 )
+            if quantization_config_path is not None:
+                with open(quantization_config_path, "r") as f:
+                    quantization_dict = json.load(f)
+                    quantization_config = BitsAndBytesConfig.from_dict(
+                        quantization_dict
+                    )
 
             storage_path = os.getenv("STORAGE_PATH", "./models")
             model_path = os.path.join("transformers", self.model_name)
@@ -136,6 +148,7 @@ class TransformersBackend(SllmBackend):
                 torch_dtype=torch_dtype,
                 storage_path=storage_path,
                 hf_model_class=hf_model_class,
+                quantization_config=quantization_config,
             )
             tokenizer_path = os.path.join(
                 storage_path, "transformers", self.model_name, "tokenizer"
