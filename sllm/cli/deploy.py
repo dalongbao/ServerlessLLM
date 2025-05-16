@@ -48,7 +48,7 @@ class DeployCommand:
         deploy_parser.add_argument(
             "--precision",
             type=str,
-            choices=["int8", "nf4", "int8"],
+            choices=["fp4", "nf4", "int8"],
             help="Precision at which to load the model (fp4, nf4, int8).",
         )
         deploy_parser.add_argument(
