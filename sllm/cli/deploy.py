@@ -46,6 +46,12 @@ class DeployCommand:
             help="Path to the JSON file containing the quantization config.",
         )
         deploy_parser.add_argument(
+            "--precision",
+            type=str,
+            choices=["int8", "nf4", "int8"],
+            help="Precision at which to load the model (fp4, nf4, int8).",
+        )
+        deploy_parser.add_argument(
             "--backend",
             type=str,
             help="Overwrite the backend in the default configuration.",
@@ -76,6 +82,7 @@ class DeployCommand:
         self.model = args.model
         self.config_path = args.config
         self.quantization_config_path = args.quantization_config_path
+        self.precision = args.precision
         self.backend = args.backend
         self.num_gpus = args.num_gpus
         self.target = args.target
@@ -111,6 +118,17 @@ class DeployCommand:
                 "Minimum instances cannot be greater than maximum instances."
             )
 
+        backend_config = config_data.get("backend_config", {})
+        quantization_config = backend_config.get("quantization_config_path")
+        precision = backend_config.get("precision")
+        backend = config_data.get("backend")
+
+        if (quantization_config or precision) and backend != "transformers":
+            raise ValueError(
+                "Quantization is only supported with the 'transformers' backend. "
+                "Either switch to 'transformers' or remove 'quantization_config_path' and 'precision'."
+            )
+
     def update_config(
         self, default_config: dict, provided_config: dict
     ) -> dict:
@@ -144,16 +162,6 @@ class DeployCommand:
             config_data["backend_config"]["pretrained_model_name_or_path"] = (
                 self.model
             )
-            if self.quantization_config_path:
-                if self.backend != "transformers":
-                    logger.error(
-                        f"Quantization is only supported for the 'transformers' backend, but got backend='{self.backend}'. "
-                        "Please use the 'transformers' backend or disable quantization."
-                    )
-                else:
-                    config_data["quantization_config_path"] = (
-                        self.quantization_config_path
-                    )
             if self.backend:
                 config_data["backend"] = self.backend
             if self.num_gpus is not None:
@@ -168,6 +176,12 @@ class DeployCommand:
                 config_data["auto_scaling_config"]["max_instances"] = (
                     self.max_instances
                 )
+            if self.quantization_config_path: 
+                config_data["backend_config"]["quantization_config_path"] = (
+                    self.quantization_config_path
+                )
+            if self.precision:
+                config_data["backend_config"]["precision"] = self.precision
         else:
             logger.error("You must specify either --model or --config.")
             exit(1)

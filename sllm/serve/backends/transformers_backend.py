@@ -118,8 +118,9 @@ class TransformersBackend(SllmBackend):
             hf_model_class = self.backend_config.get("hf_model_class", None)
             quantization_config = None
             quantization_config_path = self.backend_config.get(
-                "quantization_config_path"
+                "quantization_config_path", None
             )
+            precision = self.backend_config.get("precision", None)
 
             if torch_dtype is None:
                 logger.warning(
@@ -133,7 +134,20 @@ class TransformersBackend(SllmBackend):
                 raise ValueError(
                     "hf_model_class cannot be None. Please provide a valid model class"
                 )
-            if quantization_config_path is not None:
+            
+            quantization_config = None
+            if precision is not None:
+                if quantization_config_path is not None:
+                    logger.warning(
+                        "Found quantization config, precision will be ignored."
+                    )
+                if precision == "fp4":
+                    quantization_config = BitsAndBytesConfig(load_in_4bit=True)
+                elif precision == "nf4":
+                    quantization_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4")
+                else:
+                    quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+            elif quantization_config_path is not None:
                 with open(quantization_config_path, "r") as f:
                     quantization_dict = json.load(f)
                     quantization_config = BitsAndBytesConfig.from_dict(
