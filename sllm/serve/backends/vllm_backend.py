@@ -170,6 +170,10 @@ class VllmBackend(SllmBackend):
         if torch_dtype is not None:
             filtered_engine_config["dtype"] = torch_dtype
 
+        quantization = backend_config.get("quantization")
+        if quantization is not None:
+            filtered_engine_config["quantization"] = quantization
+
         if load_format is not None:
             filtered_engine_config["load_format"] = load_format
             filtered_engine_config["model"] = backend_config.get(
