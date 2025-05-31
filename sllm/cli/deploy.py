@@ -17,6 +17,7 @@
 # ---------------------------------------------------------------------------- #
 import os
 from argparse import Namespace, _SubParsersAction
+from contextlib import suppress
 
 import requests
 
@@ -76,6 +77,58 @@ class DeployCommand:
             nargs="+",
             help="Specify LoRA adapters in the format <name>=<path>.",
         )
+        deploy_parser.add_argument(
+            "--load-format",
+            type=str,
+            choices=[
+                "auto",
+                "pt",
+                "safetensors",
+                "npcache",
+                "dummy",
+                "tensorizer",
+                "sharded_state",
+                "gguf",
+                "bitsandbytes",
+                "mistral",
+                "runai_streamer",
+            ],
+            help="The format of the model weights to load. "
+        )
+        deploy_parser.add_argument(
+            "--quantization",
+            "-q",
+            type=str,
+            choices=[
+                "aqlm",
+                "awq",
+                "deepspeedfp",
+                "tpu_int8",
+                "fp8",
+                "fbgemm_fp8",
+                "modelopt",
+                "marlin",
+                "gguf",
+                "gptq_marlin_24",
+                "gptq_marlin",
+                "awq_marlin",
+                "gptq",
+                "compressed-tensors",
+                "bitsandbytes",
+                "qqq",
+                "hqq",
+                "experts_int8",
+                "neuron_quant",
+                "ipex",
+                "quark",
+                "moe_wna16",
+            ],
+            help=(
+                "Specify the quantization method for vLLM. "
+                "For transformers-based models, also see --quantization-config-path."
+            ),
+        )
+
         deploy_parser.set_defaults(func=DeployCommand)
 
     def __init__(self, args: Namespace) -> None:
@@ -93,11 +146,13 @@ class DeployCommand:
             else None
         )
         self.url = (
-            os.getenv("LLM_SERVER_URL", "http://127.0.0.1:8343/") + "register"
+            os.getenv("LLM_SERVER_URL", "http://127.0.0.1:8343") + "/register"
         )
         self.default_config_path = os.path.join(
             os.path.dirname(__file__), "default_config.json"
         )
+        self.load_format = args.load_format
+        self.quantization = args.quantization
 
     def parse_lora_adapters(self, lora_adapters):
         parsed_modules = {}
@@ -133,6 +188,17 @@ class DeployCommand:
             raise ValueError(
                 "Minimum instances cannot be greater than maximum instances."
             )
+        
+        with suppress(KeyError):
+            quantization = config_data["backend_config"]["quantization"]
+            load_format = config_data["backend_config"]["load_format"] 
+        
+        if quantization == "bitsandbytes" and load_format != "bitsandabytes":
+            logger.debug(
+                "'bitsandbytes' quantization detected, defaulting load_format to bitsandbytes."
+            )
+            config_data["backend_config"]["load_format"] = "bitsandbytes"
+
 
     def update_config(
         self, default_config: dict, provided_config: dict
@@ -188,6 +254,12 @@ class DeployCommand:
         if self.enable_lora:
             config_data["backend_config"]["enable_lora"] = True
             config_data["backend_config"]["lora_adapters"] = self.lora_adapters
+
+        if self.backend == "vllm":
+            if self.load_format:
+                config_data["backend_config"]["load_format"] = self.load_format
+            if self.quantization:
+                config_data["backend_config"]["quantization"] = self.quantization
 
         self.validate_config(config_data)
         logger.info(f"Deploying model {config_data['model']}.")
