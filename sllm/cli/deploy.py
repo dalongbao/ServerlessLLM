@@ -189,16 +189,22 @@ class DeployCommand:
                 "Minimum instances cannot be greater than maximum instances."
             )
         
-        with suppress(KeyError):
-            quantization = config_data["backend_config"]["quantization"]
-            load_format = config_data["backend_config"]["load_format"] 
-        
-        if quantization == "bitsandbytes" and load_format != "bitsandabytes":
-            logger.debug(
-                "'bitsandbytes' quantization detected, defaulting load_format to bitsandbytes."
+        quantization = config_data["backend_config"].get("quantization", None)
+        load_format = config_data["backend_config"].get("load_format", None)
+    
+        if quantization == "bitsandbytes" and load_format != "bitsandbytes":
+            logger.info(
+                "'bitsandbytes' quantization detected, using bitsandbytes load format."
             )
             config_data["backend_config"]["load_format"] = "bitsandbytes"
-
+        
+        if quantization is not None and config_data["backend"] != "vllm":
+            logger.warning(
+                "You passed `--quantization=%s` but `--backend` is not 'vllm'; "
+                "--quantization will be ignored. "
+                "To quantize under the Transformers backend, use `--quantization-config-path` instead.",
+                quantization,
+            )
 
     def update_config(
         self, default_config: dict, provided_config: dict
@@ -255,11 +261,10 @@ class DeployCommand:
             config_data["backend_config"]["enable_lora"] = True
             config_data["backend_config"]["lora_adapters"] = self.lora_adapters
 
-        if self.backend == "vllm":
-            if self.load_format:
-                config_data["backend_config"]["load_format"] = self.load_format
-            if self.quantization:
-                config_data["backend_config"]["quantization"] = self.quantization
+        if self.load_format:
+            config_data["backend_config"]["load_format"] = self.load_format
+        if self.quantization:
+            config_data["backend_config"]["quantization"] = self.quantization
 
         self.validate_config(config_data)
         logger.info(f"Deploying model {config_data['model']}.")
