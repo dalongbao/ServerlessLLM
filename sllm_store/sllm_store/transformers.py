@@ -295,6 +295,7 @@ def best_effort_load(
     replica_uuid = _get_uuid()
     device_map = _transform_device_map_to_dict(device_map)
 
+
     if isinstance(device_map, dict) and (
         torch.device("cpu") in device_map.values()
         or "cpu" in device_map.values()
