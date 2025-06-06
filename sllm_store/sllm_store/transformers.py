@@ -314,6 +314,7 @@ def best_effort_load(
     logger.debug(f"load config takes {time.time() - start} seconds")
     start = time.time()
     with init_empty_weights():
+
         module = importlib.import_module("transformers")
         _class = getattr(module, hf_model_class)
         model = _class.from_config(config, trust_remote_code=True).to(
