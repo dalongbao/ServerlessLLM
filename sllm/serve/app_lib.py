@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 import ray
 import ray.exceptions
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from sllm.serve.logger import init_logger
 
@@ -36,6 +37,12 @@ def create_app() -> FastAPI:
         ray.shutdown()
 
     app = FastAPI(lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["POST", "OPTIONS"],
+        allow_headers=["content-type"],
+    )
 
     @app.get("/health")
     async def health_check():
