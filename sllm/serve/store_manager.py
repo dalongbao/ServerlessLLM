@@ -101,7 +101,9 @@ class SllmLocalStore:
                 delta_time = self.io_queue[-1]["estimated_time"] - time.time()
                 if delta_time < 0:
                     delta_time = 0
-            hardware_info = collect_all_info()
+                hardware_info = await collect_all_info.options(
+                    resources={f"worker_id_{self.node_id}": 0.01}
+                ).remote()
             return {
                 "node_id": self.node_id,
                 "disk_models": self.disk_models,
