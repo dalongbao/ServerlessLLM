@@ -23,6 +23,7 @@ import ray
 import ray.exceptions
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from sllm.serve.logger import init_logger
 
