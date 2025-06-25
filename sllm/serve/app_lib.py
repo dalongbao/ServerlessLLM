@@ -199,7 +199,13 @@ def create_app() -> FastAPI:
             logger.info("Controller actor found")
             result = await controller.worker_status.remote()
             logger.info("Worker status retrieved successfully")
-            return result
+            try:
+                json.dumps(result)
+            except TypeError as e:
+                logger.error(f"Serialization error: {e}")
+                raise HTTPException(status_code=500, detail="Response not serializable")
+
+            return JSONResponse(content=result)
 
         except Exception as e:
             logger.error(f"Error retrieving workers: {str(e)}")
