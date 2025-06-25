@@ -16,6 +16,7 @@
 #  limitations under the license.                                              #
 # ---------------------------------------------------------------------------- #
 import os
+import json
 from contextlib import asynccontextmanager
 
 import ray
