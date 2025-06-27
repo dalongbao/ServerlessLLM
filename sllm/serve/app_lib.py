@@ -15,8 +15,8 @@
 #  see the license for the specific language governing permissions and         #
 #  limitations under the license.                                              #
 # ---------------------------------------------------------------------------- #
-import os
 import json
+import os
 from contextlib import asynccontextmanager
 
 import ray
@@ -205,7 +205,9 @@ def create_app() -> FastAPI:
                 json.dumps(result)
             except TypeError as e:
                 logger.error(f"Serialization error: {e}")
-                raise HTTPException(status_code=500, detail="Response not serializable")
+                raise HTTPException(
+                    status_code=500, detail="Response not serializable"
+                )
 
             return JSONResponse(content=result)
 

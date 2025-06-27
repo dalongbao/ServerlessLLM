@@ -515,8 +515,14 @@ class RoundRobinRouter(SllmRouter):
         return
 
     async def get_active_work(self) -> List[Dict]:
+        work_items = []
         async with self.registry_lock:
-            return list(self.active_requests_registry.values())
+            for query_id, details in self.active_requests_registry.items():
+                if details.get("status") == "QUEUED":
+                    item = details.copy()
+                    item["id"] = query_id
+                    work_items.append(item)
+        return work_items
 
     async def get_query_status(self, query_id: str) -> Dict:
         status_data = self.active_requests_registry.get(query_id)

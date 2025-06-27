@@ -18,7 +18,7 @@
 import asyncio
 import datetime
 import os
-from typing import List, Mapping, Optional, Dict
+from typing import Dict, List, Mapping, Optional
 
 import ray
 
