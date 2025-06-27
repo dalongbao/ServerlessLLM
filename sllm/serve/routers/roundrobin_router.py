@@ -158,6 +158,7 @@ class RoundRobinRouter(SllmRouter):
         enqueue_time = time.time()
         async with self.registry_lock:
             self.active_requests_registry[query_id] = {
+                "query_id": query_id,
                 "status": "QUEUED",
                 "enqueue_time": enqueue_time,
                 "action": action,
@@ -520,7 +521,6 @@ class RoundRobinRouter(SllmRouter):
             for query_id, details in self.active_requests_registry.items():
                 if details.get("status") == "QUEUED":
                     item = details.copy()
-                    item["id"] = query_id
                     work_items.append(item)
         return work_items
 
