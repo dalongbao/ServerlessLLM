@@ -153,7 +153,8 @@ class RoundRobinRouter(SllmRouter):
         async with self.idle_time_lock:
             self.idle_time = 0
 
-        query_id = request_data["id"]
+        query_id = request_data.get("id") or uuid.uuid4()
+        request_data["id"] = query_id
         enqueue_time = time.time()
         async with self.registry_lock:
             self.active_requests_registry[query_id] = {
