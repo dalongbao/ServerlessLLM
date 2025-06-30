@@ -317,7 +317,12 @@ class StoreManager:
         while True:
             try:
                 managed_nodes = set(self.local_servers.keys())
-                worker_node_info = get_worker_nodes()
+                try:
+                    worker_node_info = get_worker_nodes()
+                except Exception as e:
+                    logger.info("No worker resources found, assuming all are down or starting.")
+                    worker_node_info = {}
+
                 ray_node_list = await asyncio.to_thread(ray.nodes)
 
                 ray_id_to_worker_id_map = {
