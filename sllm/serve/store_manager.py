@@ -319,49 +319,56 @@ class StoreManager:
             try:
                 try:
                     worker_node_info = get_worker_nodes()
-                except Exception as e:
+                except AssertionError:
                     logger.info("No worker resources found, assuming all are down or starting.")
                     worker_node_info = {}
 
                 async with self.metadata_lock:
-                    managed_nodes = set(self.local_servers.keys())
+                    managed_ray_ids_copy = self.managed_ray_ids.copy()
 
-                ready_worker_ids = set(worker_node_info.keys())
+                ready_workers = {
+                    worker_id: info['ray_node_id'] 
+                    for worker_id, info in worker_node_info.items()
+                }
 
-                nodes_to_relink = set()
-                for worker_id, new_info in worker_node_info.items():
-                    if worker_id in self.managed_ray_ids:
-                        old_ray_id = self.managed_ray_ids.get(worker_id)
-                        new_ray_id = new_info['ray_node_id']
-                        if old_ray_id != new_ray_id:
-                            logger.warning(
-                                f"Worker '{worker_id}' has restarted with a new Ray NodeID. "
-                                f"Old: {old_ray_id}, New: {new_ray_id}. Re-linking..."
-                            )
-                            nodes_to_relink.add(worker_id)
-                if nodes_to_relink:
-                    await self._prune_disconnected(nodes_to_relink)
-                    managed_nodes = managed_nodes - nodes_to_relink
+                nodes_to_prune = set()
+                nodes_to_init = set()
 
-                disconnected = managed_nodes - ready_worker_ids 
-                if disconnected:
-                    logger.info(f"Pruning disconnected worker(s): {disconnected}")
-                    await self._prune_disconnected(disconnected)
+                for worker_id, old_ray_id in managed_ray_ids_copy.items():
+                    if worker_id in ready_workers and ready_workers[worker_id] != old_ray_id:
+                        logger.warning(
+                            f"Worker '{worker_id}' has been replaced. Old Ray ID: {old_ray_id}, "
+                            f"New Ray ID: {ready_workers[worker_id]}. Re-initializing."
+                        )
+                        nodes_to_prune.add(worker_id)
+                        nodes_to_init.add(worker_id)
 
-                unseen = ready_worker_ids - managed_nodes
-                if unseen:
-                    logger.info(f"New worker(s) detected: {unseen}")
-                    await self._initialise_nodes(unseen, worker_node_info)
+                dead_workers = set(managed_ray_ids_copy.keys()) - set(ready_workers.keys())
+                if dead_workers:
+                    logger.info(f"Worker(s) {dead_workers} are no longer available. Pruning.")
+                    nodes_to_prune.update(dead_workers)
 
+                new_workers = set(ready_workers.keys()) - set(managed_ray_ids_copy.keys())
+                if new_workers:
+                    logger.info(f"New worker(s) detected: {new_workers}. Initializing.")
+                    nodes_to_init.update(new_workers)
+
+                if nodes_to_prune:
+                    await self._prune_disconnected(nodes_to_prune)
+                
+                if nodes_to_init:
+                    await self._initialise_nodes(nodes_to_init, worker_node_info)
+                    
                 print(f"worker_node_info: {worker_node_info}")
-                print(f"disconnected: {disconnected}")
-                print(f"ready_workers: {ready_worker_ids}")
-                print(f"unseen: {unseen}")
+                print(f"dead: {dead_workers}")
+                print(f"prune: {nodes_to_prune}")
+                print(f"init: {nodes_to_init}")
 
             except Exception as e:
-                logger.warning(f"Failed to update worker status, will retry: {e}", exc_info=True)
+                logger.warning(f"An unexpected error occurred in _watch_workers, will retry: {e}", exc_info=True)
 
             await asyncio.sleep(5)
+
 
     async def _setup_single_node(
         self, node_id: str, worker_node_info: dict
