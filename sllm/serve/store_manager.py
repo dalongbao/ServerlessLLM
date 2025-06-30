@@ -259,6 +259,7 @@ class StoreManager:
         self.local_servers = {}
         self.model_info = {}
         self.model_storage_info = {}
+        self.managed_ray_ids = {}
 
         asyncio.create_task(self._watch_workers())
 
@@ -316,32 +317,37 @@ class StoreManager:
     async def _watch_workers(self):
         while True:
             try:
-                managed_nodes = set(self.local_servers.keys())
                 try:
                     worker_node_info = get_worker_nodes()
                 except Exception as e:
                     logger.info("No worker resources found, assuming all are down or starting.")
                     worker_node_info = {}
 
-                ray_node_list = await asyncio.to_thread(ray.nodes)
+                async with metadata_lock:
+                    managed_nodes = set(self.local_servers.keys())
 
-                ray_id_to_worker_id_map = {
-                    info['ray_node_id']: worker_id
-                    for worker_id, info in worker_node_info.items()
-                }
+                ready_worker_ids = set(worker_node_info.keys())
 
-                live_worker_ids = {
-                    ray_id_to_worker_id_map[node["NodeID"]]
-                    for node in ray_node_list
-                    if node.get("Alive") and node["NodeID"] in ray_id_to_worker_id_map
-                }
+                nodes_to_relink = set()
+                for worker_id, new_info in worker_node_info.items():
+                    if worker_id in self.managed_ray_ids:
+                        old_ray_id = self.managed_ray_ids.get(worker_id)
+                        new_ray_id = new_info['ray_node_id']
+                        if old_ray_id != new_ray_id:
+                            logger.warning(
+                                f"Worker '{worker_id}' has restarted with a new Ray NodeID. "
+                                f"Old: {old_ray_id}, New: {new_ray_id}. Re-linking..."
+                            )
+                            nodes_to_relink.add(worker_id)
+                if nodes_to_relink:
+                    await self._prune_disconnected(nodes_to_relink)
+                    managed_nodes = managed_nodes - nodes_to_relink
 
-                disconnected = managed_nodes - live_worker_ids
+                disconnected = managed_nodes - ready_worker_ids 
                 if disconnected:
                     logger.info(f"Pruning disconnected worker(s): {disconnected}")
                     await self._prune_disconnected(disconnected)
 
-                ready_worker_ids = set(worker_node_info.keys())
                 unseen = ready_worker_ids - managed_nodes
                 if unseen:
                     logger.info(f"New worker(s) detected: {unseen}")
@@ -349,11 +355,8 @@ class StoreManager:
 
                 print(f"worker_node_info: {worker_node_info}")
                 print(f"disconnected: {disconnected}")
-                print(f"live workers: {live_worker_ids}")
                 print(f"ready_workers: {ready_worker_ids}")
                 print(f"unseen: {unseen}")
-                print(f"ray_id_to_worker_id_map: {ray_id_to_worker_id_map}")
-                print(f"ray_node_list: {ray_node_list}")
 
             except Exception as e:
                 logger.warning(f"Failed to update worker status, will retry: {e}", exc_info=True)
@@ -420,8 +423,10 @@ class StoreManager:
         for node_id in list(node_ids):
             if node_id not in worker_node_info:
                 continue
-            ok = await self._setup_single_node(node_id, worker_node_info)
-            if not ok:
+            if await self._setup_single_node(node_id, worker_node_info):
+                async with metadata_lock:
+                    self.managed_ray_ids[node_id] = worker_node_info[node_id]['ray_node_id']
+            else:
                 await self._prune_disconnected({node_id})
 
     async def _prune_disconnected(self, node_ids: Set[str]):
@@ -433,6 +438,8 @@ class StoreManager:
                 ].client.server_address.split(":", 1)[0]
                 self.local_servers.pop(node_id, None)
                 self.hardware_info.pop(node_id, None)
+                async with metadata_lock:
+                    self.managed_ray_ids.pop(node_id, None)
 
                 for model, placement in list(self.model_storage_info.items()):
                     placement.pop(node_id, None)
