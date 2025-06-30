@@ -340,9 +340,11 @@ class StoreManager:
             try:
                 worker_node_info = get_worker_nodes()
                 unseen = set(worker_node_info) - set(self.local_servers)
+                print(worker_node_info)
+                print(set(self.local_servers))
                 if unseen:
                     logger.info(f"New worker(s) detected: {unseen}")
-                    await self._initialise_nodes(unseen, worker_node_info)
+                    await self._setup_single_node(unseen, worker_node_info)
             except Exception as e:
                 logger.warning(f"Failed to list worker nodes: {e}")
 
