@@ -347,6 +347,14 @@ class StoreManager:
                     logger.info(f"New worker(s) detected: {unseen}")
                     await self._initialise_nodes(unseen, worker_node_info)
 
+                print(f"worker_node_info: {worker_node_info}")
+                print(f"disconnected: {disconnected}")
+                print(f"live workers: {live_worker_ids}")
+                print(f"ready_workers: {ready_worker_ids}")
+                print(f"unseen: {unseen}")
+                print(f"ray_id_to_worker_id_map: {ray_id_to_worker_id_map}")
+                print(f"ray_node_list: {ray_node_list}")
+
             except Exception as e:
                 logger.warning(f"Failed to update worker status, will retry: {e}", exc_info=True)
 
