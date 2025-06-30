@@ -315,40 +315,35 @@ class StoreManager:
 
     async def _watch_workers(self):
         while True:
-            disconnected = set()
             try:
-                managed_node_ids = set(self.local_servers.keys())
-                if managed_node_ids:
-                    ray_node_list = await asyncio.to_thread(ray.nodes)
-                    live_node_ids = {
-                        node["NodeID"]
-                        for node in ray_node_list
-                        if node.get("Alive")
-                    }
-                    disconnected = managed_node_ids - live_node_ids
-            except Exception as e:
-                logger.warning(
-                    f"ray.nodes() failed ({e}), skipping this round"
-                )
-
-            if disconnected:
-                logger.info(
-                    f"Pruning disconnected worker(s): {disconnected}"
-                )
-                await self._prune_disconnected(disconnected)
-
-            try:
+                managed_nodes = set(self.local_servers.keys())
                 worker_node_info = get_worker_nodes()
-                unseen = set(worker_node_info) - set(self.local_servers)
-                print(unseen)
-                print(worker_node_info)
-                print(disconnected)
-                print(self.local_servers)
+                ray_node_list = await asyncio.to_thread(ray.nodes)
+
+                ray_id_to_worker_id_map = {
+                    info['ray_node_id']: worker_id
+                    for worker_id, info in worker_node_info.items()
+                }
+
+                live_worker_ids = {
+                    ray_id_to_worker_id_map[node["NodeID"]]
+                    for node in ray_node_list
+                    if node.get("Alive") and node["NodeID"] in ray_id_to_worker_id_map
+                }
+
+                disconnected = managed_nodes - live_worker_ids
+                if disconnected:
+                    logger.info(f"Pruning disconnected worker(s): {disconnected}")
+                    await self._prune_disconnected(disconnected)
+
+                ready_worker_ids = set(worker_node_info.keys())
+                unseen = ready_worker_ids - managed_nodes
                 if unseen:
                     logger.info(f"New worker(s) detected: {unseen}")
                     await self._initialise_nodes(unseen, worker_node_info)
+
             except Exception as e:
-                logger.warning(f"Failed to list worker nodes: {e}")
+                logger.warning(f"Failed to update worker status, will retry: {e}", exc_info=True)
 
             await asyncio.sleep(5)
 
