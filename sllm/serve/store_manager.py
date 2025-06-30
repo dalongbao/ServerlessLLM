@@ -323,7 +323,7 @@ class StoreManager:
                     logger.info("No worker resources found, assuming all are down or starting.")
                     worker_node_info = {}
 
-                async with metadata_lock:
+                async with self.metadata_lock:
                     managed_nodes = set(self.local_servers.keys())
 
                 ready_worker_ids = set(worker_node_info.keys())
@@ -424,7 +424,7 @@ class StoreManager:
             if node_id not in worker_node_info:
                 continue
             if await self._setup_single_node(node_id, worker_node_info):
-                async with metadata_lock:
+                async with self.metadata_lock:
                     self.managed_ray_ids[node_id] = worker_node_info[node_id]['ray_node_id']
             else:
                 await self._prune_disconnected({node_id})
@@ -438,7 +438,7 @@ class StoreManager:
                 ].client.server_address.split(":", 1)[0]
                 self.local_servers.pop(node_id, None)
                 self.hardware_info.pop(node_id, None)
-                async with metadata_lock:
+                async with self.metadata_lock:
                     self.managed_ray_ids.pop(node_id, None)
 
                 for model, placement in list(self.model_storage_info.items()):
