@@ -327,6 +327,7 @@ class StoreManager:
             }
             try:
                 ray_node_list = await asyncio.to_thread(ray.nodes)
+                logger.info(f"nodes alive: {ray_node_list}")
                 for n in ray_node_list:
                     if not n.get("Alive", False):
                         ip = n.get("address")
