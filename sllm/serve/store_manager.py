@@ -17,7 +17,6 @@
 # ---------------------------------------------------------------------------- #
 import asyncio
 import os
-import shutil
 import time
 from typing import List, Mapping, Optional, Set
 
@@ -543,14 +542,6 @@ class StoreManager:
                 await self._prune_disconnected({node_id})
 
     async def _prune_disconnected(self, node_ids: Set[str]):
-        ssh_path = shutil.which("ssh")
-        if not ssh_path:
-            logger.critical(
-                "ssh command not found in PATH. Cannot prune disconnected nodes. "
-                "Please ensure ssh is installed and the Ray process has a valid PATH."
-            )
-        return
-
         endpoints = {}
         async with self.metadata_lock:
             for node_id in node_ids:
@@ -564,35 +555,6 @@ class StoreManager:
                 self.managed_ray_ids.pop(node_id, None)
 
                 logger.info(f"Pruned metadata for disconnected node {node_id}")
-
-        for node_id, ip in endpoints.items():
-            try:
-                cmd = [
-                    ssh_path,
-                    "-o", "BatchMode=yes",
-                    "-o", "StrictHostKeyChecking=no", 
-                    "-o", "ConnectTimeout=10",
-                    ip,
-                    "ray", "stop", "--force",
-                ]
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                out, err = await asyncio.wait_for(
-                    proc.communicate(), timeout=15
-                )
-                if proc.returncode == 0:
-                    logger.info(f"Stopped Ray cleanly on {node_id}@{ip}")
-                else:
-                    logger.error(
-                        f"ray stop failed on {node_id}@{ip}: {err.decode().strip()}"
-                    )
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout stopping Ray on {node_id}@{ip}")
-            except Exception as e:
-                logger.error(f"Error stopping Ray on {node_id}@{ip}: {e}")
 
     async def _setup_single_node(
         self, node_id: str, worker_node_info: dict
