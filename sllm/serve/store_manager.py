@@ -442,6 +442,7 @@ class StoreManager:
                     worker_node_info = {}
 
                 async with self.metadata_lock:
+                    # Get a snapshot of the state we are currently managing
                     managed_ray_ids_copy = self.managed_ray_ids.copy()
 
                 ready_workers = {
@@ -450,45 +451,41 @@ class StoreManager:
                 }
 
                 nodes_to_prune = set()
-                nodes_to_init = set()
-
                 for worker_id, old_ray_id in managed_ray_ids_copy.items():
-                    if (
-                        worker_id in ready_workers
-                        and ready_workers[worker_id] != old_ray_id
-                    ):
-                        logger.warning(
-                            f"Worker '{worker_id}' has been replaced. Old Ray ID: {old_ray_id}, "
-                            f"New Ray ID: {ready_workers[worker_id]}. Re-initializing."
+                    if worker_id not in ready_workers:
+                        logger.info(
+                            f"Worker(s) {worker_id} are no longer available. Pruning."
                         )
                         nodes_to_prune.add(worker_id)
-                        nodes_to_init.add(worker_id)
-
-                dead_workers = set(managed_ray_ids_copy.keys()) - set(
-                    ready_workers.keys()
-                )
-                if dead_workers:
-                    logger.info(
-                        f"Worker(s) {dead_workers} are no longer available. Pruning."
-                    )
-                    nodes_to_prune.update(dead_workers)
-
-                new_workers = set(ready_workers.keys()) - set(
-                    managed_ray_ids_copy.keys()
-                )
-                if new_workers:
-                    logger.info(
-                        f"New worker(s) detected: {new_workers}. Initializing."
-                    )
-                    nodes_to_init.update(new_workers)
+                    elif ready_workers[worker_id] != old_ray_id:
+                        logger.warning(
+                            f"Worker '{worker_id}' has been replaced. Old Ray ID: {old_ray_id}, "
+                            f"New Ray ID: {ready_workers[worker_id]}. Pruning old instance."
+                        )
+                        nodes_to_prune.add(worker_id)
 
                 if nodes_to_prune:
                     await self._prune_disconnected(nodes_to_prune)
+                    for worker_id in nodes_to_prune:
+                        managed_ray_ids_copy.pop(worker_id, None)
+                nodes_to_init = set(ready_workers.keys()) - set(
+                    managed_ray_ids_copy.keys()
+                )
 
                 if nodes_to_init:
+                    logger.info(
+                        f"New worker(s) detected: {nodes_to_init}. Initializing."
+                    )
                     await self._initialise_nodes(
                         nodes_to_init, worker_node_info
                     )
+
+                logger.debug(
+                    f"Pruned: {nodes_to_prune if nodes_to_prune else 'None'}"
+                )
+                logger.debug(
+                    f"Initialized: {nodes_to_init if nodes_to_init else 'None'}"
+                )
 
                 logger.debug(f"worker_node_info: {worker_node_info}")
                 logger.debug(f"dead: {dead_workers}")
