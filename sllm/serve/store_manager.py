@@ -433,29 +433,39 @@ class StoreManager:
             if await self._setup_single_node(node_id, worker_node_info):
                 async with self.metadata_lock:
                     self.managed_ray_ids[node_id] = worker_node_info[node_id]['ray_node_id']
+
+                models_to_restore = []
+                async with self.metadata_lock:
+                    for model_name, placement in self.model_storage_info.items():
+                        if node_id in placement:
+                            models_to_restore.append(model_name)
+                
+                if models_to_restore:
+                    logger.info(f"Node {node_id} requires models: {models_to_restore}. Starting restoration.")
+                    for model_name in models_to_restore:
+                        await self._relink_worker(model_name, node_id)
             else:
                 await self._prune_disconnected({node_id})
 
     async def _prune_disconnected(self, node_ids: Set[str]):
         endpoints = {}
+        nodes_to_stop = set()
         async with self.metadata_lock:
             for node_id in node_ids:
-                endpoints[node_id] = self.local_servers[
-                    node_id
-                ].client.server_address.split(":", 1)[0]
+                if node_id in self.local_servers:
+                    endpoints[node_id] = self.local_servers[
+                        node_id
+                    ].client.server_address.split(":", 1)[0]
+                    nodes_to_stop.add(node_id)
+
                 self.local_servers.pop(node_id, None)
                 self.hardware_info.pop(node_id, None)
-                async with self.metadata_lock:
-                    self.managed_ray_ids.pop(node_id, None)
+                self.managed_ray_ids.pop(node_id, None)
 
-                for model, placement in list(self.model_storage_info.items()):
-                    placement.pop(node_id, None)
-                    if not placement:
-                        logger.warning(f"No replicas left for model {model}")
+                logger.info(f"Pruned runtime metadata for disconnected node {node_id}")
 
-                logger.info(f"Pruned metadata for disconnected node {node_id}")
-
-        for node_id, ip in endpoints.items():
+        for node_id in nodes_to_stop:
+            ip = endpoints[node_id]
             try:
                 cmd = [
                     "ssh",
@@ -486,6 +496,47 @@ class StoreManager:
                 logger.error(f"Timeout stopping Ray on {node_id}@{ip}")
             except Exception as e:
                 logger.error(f"Error stopping Ray on {node_id}@{ip}: {e}")
+
+    async def _relink_worker(self, model_name: str, node_id: str):
+        async with self.metadata_lock:
+            if node_id not in self.local_servers:
+                logger.error(f"Cannot relink on node {node_id}: not managed.")
+                return
+            model_config = self.model_info.get(model_name)
+            local_server = self.local_servers[node_id]
+
+        if not model_config:
+            logger.error(f"Cannot relink {model_name}: original config not found.")
+            return
+
+        logger.info(f"Provisioning model {model_name} on node {node_id}")
+        backend = model_config.get("backend")
+        backend_config = model_config.get("backend_config", {})
+        pretrained_model_name_or_path = backend_config.get("pretrained_model_name_or_path")
+
+        if backend == "transformers":
+            await self.download_transformers_model(
+                model_name,
+                pretrained_model_name_or_path,
+                node_id,
+                backend_config.get("hf_model_class"),
+                backend_config.get("torch_dtype", "float16"),
+            )
+        elif backend == "vllm":
+            await self.download_vllm_model(
+                model_name,
+                pretrained_model_name_or_path,
+                node_id,
+                model_config.get("num_gpus", 1),
+                backend_config.get("tensor_parallel_size", 1),
+                backend_config.get("torch_dtype", "float16"),
+            )
+        else:
+            logger.error(f"Backend {backend} not supported for relink of {model_name}")
+            return
+
+        await local_server.register_model(model_name, backend, backend_config)
+        logger.info(f"Successfully provisioned {model_name} on node {node_id}")
 
     async def get_hardware_info(self):
         return self.hardware_info
@@ -540,120 +591,135 @@ class StoreManager:
 
     async def register(self, model_config):
         model_name = model_config.get("model")
+        
+        async with self.metadata_lock:
+            if not self.local_servers:
+                logger.error(f"Cannot register {model_name}: No available worker nodes.")
+                return
+
+            if model_name in self.model_info:
+                logger.info(f"Model {model_name} is already registered. Placement updates are not yet implemented.")
+                return
+            
+            self.model_info[model_name] = model_config
+            self.model_storage_info[model_name] = {}
+            logger.info(f"Registering new model {model_name}")
+
         backend = model_config.get("backend", None)
         if backend is None:
             logger.error(f"Backend not specified for {model_name}")
             return
         backend_config = model_config.get("backend_config", {})
         placement_config = model_config.get("placement_config", {})
-        if model_name not in self.model_info:
-            self.model_storage_info[model_name] = {}
-            logger.info(f"Registering new {model_name}")
+        
+        pretrained_model_name_or_path = backend_config.get(
+            "pretrained_model_name_or_path", None
+        )
+        
+        worker_node_info = get_worker_nodes()
+        if not worker_node_info:
+            logger.error("Registration failed: No worker nodes found.")
+            # Clean up the state if registration cannot proceed
+            async with self.metadata_lock:
+                self.model_info.pop(model_name, None)
+                self.model_storage_info.pop(model_name, None)
+            return
 
-            backend = model_config.get("backend", None)
-            pretrained_model_name_or_path = backend_config.get(
-                "pretrained_model_name_or_path", None
-            )
-            # 1. download this model to one worker using round-robin
-            worker_node_info = get_worker_nodes()
+        n_nodes = len(worker_node_info)
 
-            n_nodes = len(worker_node_info)
-            assert n_nodes > 0, "No worker nodes found"
-
-            for node_id, node_info in worker_node_info.items():
-                node_address = node_info["address"]
-                if node_id not in self.local_servers:
-                    if self.local_servers:
-                        first_node = next(iter(self.local_servers.values()))
-                        self.local_servers[node_id] = SllmLocalStore(
-                            node_id,
-                            SllmStoreClient(f"{node_address}:8073"),
-                            1,
-                            first_node.chunk_size,
-                            first_node.hardware_info,
-                        )
-                    else:
-                        logger.error(f"Node {node_id} not found")
-                        raise ValueError(f"Node {node_id} not found")
-
-            local_disk = []
-            if placement_config and "local_disk" in placement_config:
-                local_disk = placement_config["local_disk"]
-                if not all(
-                    [node_id in worker_node_info for node_id in local_disk]
-                ):
-                    logger.error(
-                        f"Invalid target nodes {local_disk}, worker nodes: {worker_node_info}"  # noqa: E501
-                    )
-                    return
-            else:
-                # round-robin
-                node_id = list(worker_node_info.keys())[
-                    self.round_robin_index % n_nodes
-                ]
-                self.round_robin_index += 1
-                local_disk = [node_id]
-
-            memory_pool = []
-            if placement_config and "memory_pool" in placement_config:
-                memory_pool = placement_config["memory_pool"]
-                if not all(
-                    [node_id in worker_node_info for node_id in memory_pool]
-                ):
-                    logger.error(
-                        f"Invalid target nodes {memory_pool}, worker nodes: {worker_node_info}"  # noqa: E501
-                    )
-                    return
-
-            logger.info(
-                f"Downloading model {pretrained_model_name_or_path} to nodes {local_disk}"  # noqa: E501
-            )
-            for node_id in local_disk:
-                if backend == "transformers":
-                    hf_model_class = backend_config.get("hf_model_class", None)
-                    torch_dtype = backend_config.get("torch_dtype", "float16")
-                    if hf_model_class is None:
-                        logger.error(
-                            "hf_model_type not specified in backend_config."
-                        )
-                        break
-                    await self.download_transformers_model(
-                        model_name,
-                        pretrained_model_name_or_path,
+        for node_id, node_info in worker_node_info.items():
+            node_address = node_info["address"]
+            if node_id not in self.local_servers:
+                if self.local_servers:
+                    first_node = next(iter(self.local_servers.values()))
+                    self.local_servers[node_id] = SllmLocalStore(
                         node_id,
-                        hf_model_class,
-                        torch_dtype,
-                    )
-                elif backend == "vllm":
-                    await self.download_vllm_model(
-                        model_name,
-                        pretrained_model_name_or_path,
-                        node_id,
-                        model_config.get("num_gpus", 1),
-                        backend_config.get("tensor_parallel_size", 1),
-                        backend_config.get("torch_dtype", "float16"),
+                        SllmStoreClient(f"{node_address}:8073"),
+                        1,
+                        first_node.chunk_size,
+                        first_node.hardware_info,
                     )
                 else:
-                    logger.error(f"Backend {backend} not supported")
-                    break
-                local_server = self.local_servers[node_id]
-                model_size = await local_server.register_model(
-                    model_name, backend, backend_config
+                    logger.error(f"Node {node_id} not found and no other nodes available.")
+                    return
+
+        local_disk = []
+        if placement_config and "local_disk" in placement_config:
+            local_disk = placement_config["local_disk"]
+            if not all(
+                [node_id in worker_node_info for node_id in local_disk]
+            ):
+                logger.error(
+                    f"Invalid target nodes {local_disk}, available worker nodes: {list(worker_node_info.keys())}"
                 )
-                # record the storage info
-                self.model_storage_info[model_name][node_id] = True
-                logger.info(f"{model_name} downloaded to node {node_id}")
-                if node_id in memory_pool:
-                    # preload to memory pool
-                    await self.load_to_host(
-                        node_id, pretrained_model_name_or_path
-                    )
-                    logger.info(f"{model_name} loaded to memory pool")
-            self.model_info[model_name] = model_size
-            logger.info(f"{model_name} registered")
+                return
         else:
-            # TODO: apply new placement config, if given
-            pass
+            node_id = list(worker_node_info.keys())[
+                self.round_robin_index % n_nodes
+            ]
+            self.round_robin_index += 1
+            local_disk = [node_id]
+
+        memory_pool = []
+        if placement_config and "memory_pool" in placement_config:
+            memory_pool = placement_config["memory_pool"]
+            if not all(
+                [node_id in worker_node_info for node_id in memory_pool]
+            ):
+                logger.error(
+                    f"Invalid target nodes {memory_pool}, available worker nodes: {list(worker_node_info.keys())}"
+                )
+                return
+
+        logger.info(
+            f"Downloading model {pretrained_model_name_or_path} to nodes {local_disk}"
+        )
+        for node_id in local_disk:
+            if backend == "transformers":
+                hf_model_class = backend_config.get("hf_model_class", None)
+                torch_dtype = backend_config.get("torch_dtype", "float16")
+                if hf_model_class is None:
+                    logger.error(
+                        "hf_model_class not specified in backend_config."
+                    )
+                    break
+                await self.download_transformers_model(
+                    model_name,
+                    pretrained_model_name_or_path,
+                    node_id,
+                    hf_model_class,
+                    torch_dtype,
+                )
+            elif backend == "vllm":
+                await self.download_vllm_model(
+                    model_name,
+                    pretrained_model_name_or_path,
+                    node_id,
+                    model_config.get("num_gpus", 1),
+                    backend_config.get("tensor_parallel_size", 1),
+                    backend_config.get("torch_dtype", "float16"),
+                )
+            else:
+                logger.error(f"Backend {backend} not supported")
+                break
+            
+            local_server = self.local_servers[node_id]
+            await local_server.register_model(
+                model_name, backend, backend_config
+            )
+            
+            async with self.metadata_lock:
+                self.model_storage_info[model_name][node_id] = True
+
+            logger.info(f"{model_name} downloaded and registered on node {node_id}")
+            
+            if node_id in memory_pool:
+                await self.load_to_host(
+                    node_id, model_name
+                )
+                logger.info(f"{model_name} preloaded to memory pool on node {node_id}")
+
+        logger.info(f"Registration process for {model_name} completed.")
 
     async def register_lora_adapter(
         self,
