@@ -21,6 +21,9 @@ from typing import List, Optional
 
 import ray
 
+from sllm.serve.logger import init_logger
+
+logger = init_logger(__name__)
 
 def get_worker_nodes():
     ray_nodes = ray.nodes()
