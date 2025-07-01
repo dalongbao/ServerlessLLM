@@ -468,10 +468,10 @@ class StoreManager:
                     await self._prune_disconnected(nodes_to_prune)
                     for worker_id in nodes_to_prune:
                         managed_ray_ids_copy.pop(worker_id, None)
-                        
                 nodes_to_init = set(ready_workers.keys()) - set(
                     managed_ray_ids_copy.keys()
                 )
+
                 if nodes_to_init:
                     logger.info(
                         f"New worker(s) detected: {nodes_to_init}. Initializing."
@@ -480,6 +480,7 @@ class StoreManager:
                         nodes_to_init, worker_node_info
                     )
 
+                logger.debug(f"worker_node_info: {worker_node_info}")
                 logger.debug(
                     f"Pruned: {nodes_to_prune if nodes_to_prune else 'None'}"
                 )
@@ -487,9 +488,6 @@ class StoreManager:
                     f"Initialized: {nodes_to_init if nodes_to_init else 'None'}"
                 )
 
-                logger.debug(f"worker_node_info: {worker_node_info}")
-                logger.debug(f"prune: {nodes_to_prune}")
-                logger.debug(f"init: {nodes_to_init}")
 
             except Exception as e:
                 logger.warning(

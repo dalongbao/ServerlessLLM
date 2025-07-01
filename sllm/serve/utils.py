@@ -24,6 +24,7 @@ import ray
 
 def get_worker_nodes():
     ray_nodes = ray.nodes()
+    logger.debug(ray_nodes)
     worker_node_info = {}
     for node in ray_nodes:
         ray_node_id = node.get("NodeID", None)
