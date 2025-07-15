@@ -25,6 +25,7 @@ import uvicorn
 
 from sllm.serve.app_lib import create_app
 from sllm.serve.controller import SllmController
+from sllm.serve.worker.hardware import benchmark_static_hardware
 from sllm.serve.logger import init_logger
 
 logger = init_logger(__name__)
