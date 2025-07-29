@@ -195,7 +195,10 @@ class SllmController:
             return model_name in self.registered_models
 
     async def delete(
-        self, model_name: str, lora_adapters: Optional[List[str]] = None
+        self,
+        model_name: str,
+        backend: Optional[str],
+        lora_adapters: Optional[List[str]] = None,
     ):
         router = None
         async with self.metadata_lock:
