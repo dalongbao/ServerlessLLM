@@ -1,4 +1,5 @@
 accelerate==1.7.0
+boto3==1.34.0
 datasets==3.6.0
 GPUtil==1.4.0
 # ServerlessLLM does not directly depend on outlines.
