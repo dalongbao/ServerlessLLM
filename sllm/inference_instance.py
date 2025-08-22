@@ -1,4 +1,3 @@
-#!/bin/bash
 # ---------------------------------------------------------------------------- #
 #  serverlessllm                                                               #
 #  copyright (c) serverlessllm team 2024                                       #
@@ -16,16 +15,40 @@
 #  see the license for the specific language governing permissions and         #
 #  limitations under the license.                                              #
 # ---------------------------------------------------------------------------- #
-set -e
 
-if [ ! -d "build" ]; then
-  mkdir build/
-fi
-cd build/
+import ray
 
-export SLLM_STORE_PYTHON_EXECUTABLE=$(which python3)
-cmake -DCMAKE_BUILD_TYPE=Release \
-  -DSLLM_STORE_PYTHON_EXECUTABLE=$SLLM_STORE_PYTHON_EXECUTABLE \
-  -DBUILD_SLLM_TESTS=ON \
-  -G Ninja ..
-cmake --build . --target all -j
+from sllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+@ray.remote
+def start_instance(
+    instance_id, backend, model_name, backend_config, startup_config
+):
+    logger.info(f"Starting instance {instance_id} with backend {backend}")
+    if backend == "vllm":
+        from sllm.backends import VllmBackend
+
+        model_backend_cls = VllmBackend
+    elif backend == "dummy":
+        from sllm.backends import DummyBackend
+
+        model_backend_cls = DummyBackend
+    elif backend == "transformers":
+        from sllm.backends import TransformersBackend
+
+        model_backend_cls = TransformersBackend
+    else:
+        logger.error(f"Unknown backend: {backend}")
+        raise ValueError(f"Unknown backend: {backend}")
+
+    model_actor_cls = ray.remote(model_backend_cls)
+
+    return model_actor_cls.options(
+        name=instance_id,
+        **startup_config,
+        max_concurrency=10,
+        lifetime="detached",
+    ).remote(model_name, backend_config)

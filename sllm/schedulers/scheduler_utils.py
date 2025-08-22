@@ -1,4 +1,3 @@
-#!/bin/bash
 # ---------------------------------------------------------------------------- #
 #  serverlessllm                                                               #
 #  copyright (c) serverlessllm team 2024                                       #
@@ -16,16 +15,35 @@
 #  see the license for the specific language governing permissions and         #
 #  limitations under the license.                                              #
 # ---------------------------------------------------------------------------- #
-set -e
+from abc import ABC, abstractmethod
+from typing import Mapping, Optional
 
-if [ ! -d "build" ]; then
-  mkdir build/
-fi
-cd build/
+from sllm.logger import init_logger
 
-export SLLM_STORE_PYTHON_EXECUTABLE=$(which python3)
-cmake -DCMAKE_BUILD_TYPE=Release \
-  -DSLLM_STORE_PYTHON_EXECUTABLE=$SLLM_STORE_PYTHON_EXECUTABLE \
-  -DBUILD_SLLM_TESTS=ON \
-  -G Ninja ..
-cmake --build . --target all -j
+logger = init_logger(__name__)
+
+
+class SllmScheduler(ABC):
+    @abstractmethod
+    def __init__(self, scheduler_config: Optional[Mapping] = None):
+        super().__init__()
+
+    @abstractmethod
+    async def start(self) -> None:
+        pass
+
+    @abstractmethod
+    async def shutdown(self) -> None:
+        pass
+
+    @abstractmethod
+    async def allocate_resource(
+        self, model_name: str, instance_id: str, resources: Mapping
+    ):
+        pass
+
+    @abstractmethod
+    async def deallocate_resource(
+        self, model_name: str, instance_id: str, resources: Mapping
+    ):
+        pass

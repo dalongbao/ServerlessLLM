@@ -15,13 +15,5 @@
 #  see the license for the specific language governing permissions and         #
 #  limitations under the license.                                              #
 # ---------------------------------------------------------------------------- #
-from argparse import _SubParsersAction
 
-
-class BaseSllmServeCLICommands:
-    @staticmethod
-    def register_subcommand(parser: _SubParsersAction):
-        raise NotImplementedError()
-
-    def run(self):
-        raise NotImplementedError()
+"""ServerlessLLM CLI module."""
