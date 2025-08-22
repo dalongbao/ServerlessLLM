@@ -22,13 +22,12 @@ from typing import List, Mapping, Optional, Set
 
 import ray
 
-from sllm.serve.hardware_info_collector import (
+from sllm.hardware_info_collector import (
     collect_all_info,
     collect_some_info,
 )
-from sllm.serve.logger import init_logger
+from sllm.logger import init_logger
 from sllm.model_downloader import (
-from sllm.hardware_info_collector import collect_all_info
     VllmModelDownloader,
     download_lora_adapter,
     download_transformers_model,
