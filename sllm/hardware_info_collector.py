@@ -35,7 +35,6 @@ def collect_all_info():
     # hardware_info["network_upload_bandwidth"] = upload_bw
     # hardware_info["network_download_bandwidth"] = download_bw
     hardware_info["GPUs_info"] = get_gpu_info()
-    print(hardware_info)
     return hardware_info
 
 
