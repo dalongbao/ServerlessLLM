@@ -22,7 +22,7 @@ Receives metrics pushed from Router, calculates desired replicas, writes to SQLi
 The Reconciler then acts on the desired state to create/delete instances.
 
 Design (from docs/v1-beta-scalable-router-design.md):
-- Receives metrics via receive_metrics(model_id, buffer_len, in_flight)
+- Receives metrics via receive_metrics(model_name, backend, buffer_len, in_flight)
 - Calculates desired replicas from total demand
 - Writes desired state to models.desired_replicas in SQLite
 
@@ -75,18 +75,17 @@ class AutoScaler:
         self.database = database
         self.interval = AUTOSCALER_INTERVAL_SECONDS
 
-        # Metrics received from Router (ephemeral, per model)
-        self._metrics: Dict[str, ModelMetrics] = {}
+        self._metrics: Dict[tuple, ModelMetrics] = {}
 
-        # Track idle time for keep_alive_seconds
-        self._model_idle_times: Dict[str, int] = {}
+        self._model_idle_times: Dict[tuple, int] = {}
 
         # Shutdown flag
         self._shutdown = asyncio.Event()
 
     def receive_metrics(
         self,
-        model_id: str,
+        model_name: str,
+        backend: str,
         buffer_len: int,
         in_flight: int,
     ):
@@ -97,19 +96,21 @@ class AutoScaler:
         This updates the cached metrics which are used by the scaling loop.
 
         Args:
-            model_id: Model identifier
+            model_name: Model name
+            backend: Backend type
             buffer_len: Number of requests in cold-start buffer
             in_flight: Number of active requests being processed
         """
-        if model_id not in self._metrics:
-            self._metrics[model_id] = ModelMetrics()
+        key = (model_name, backend)
+        if key not in self._metrics:
+            self._metrics[key] = ModelMetrics()
 
-        metrics = self._metrics[model_id]
+        metrics = self._metrics[key]
         metrics.buffer_len = buffer_len
         metrics.in_flight = in_flight
 
         logger.debug(
-            f"[{model_id}] Received metrics: "
+            f"[{key}] Received metrics: "
             f"buffer={buffer_len}, in_flight={in_flight}"
         )
 
@@ -154,7 +155,10 @@ class AutoScaler:
             try:
                 await self._scale_model(model)
             except Exception as e:
-                logger.error(f"Error scaling {model.id}: {e}", exc_info=True)
+                logger.error(
+                    f"Error scaling ({model.model_name}, {model.backend}): {e}",
+                    exc_info=True,
+                )
 
     async def _scale_model(self, model: Model):
         """
@@ -163,10 +167,10 @@ class AutoScaler:
         Args:
             model: Model to scale
         """
-        # Get metrics from cache (pushed by Router)
-        metrics = self._metrics.get(model.id)
+        key = (model.model_name, model.backend)
+
+        metrics = self._metrics.get(key)
         if not metrics:
-            # No metrics received yet - use zero demand
             total_demand = 0
             buffer_length = 0
             in_flight_count = 0
@@ -175,46 +179,39 @@ class AutoScaler:
             buffer_length = metrics.buffer_len
             in_flight_count = metrics.in_flight
 
-        # Calculate desired replicas
         if total_demand > 0:
-            # At least one instance for any demand
             raw_desired = math.ceil(
                 total_demand / model.target_pending_requests
             )
         else:
             raw_desired = model.min_replicas
 
-        # Clamp to min/max
         desired = max(model.min_replicas, min(raw_desired, model.max_replicas))
 
-        # Handle keep_alive_seconds
         current_desired = model.desired_replicas
         if desired < current_desired and model.keep_alive_seconds > 0:
-            # We want to scale down - check keep_alive
-            idle_time = self._model_idle_times.get(model.id, 0)
+            idle_time = self._model_idle_times.get(key, 0)
             if idle_time < model.keep_alive_seconds:
-                # Keep instances alive
-                self._model_idle_times[model.id] = idle_time + self.interval
+                self._model_idle_times[key] = idle_time + self.interval
                 logger.debug(
-                    f"[{model.id}] Keep alive: idle={idle_time + self.interval}s, "
+                    f"[{key}] Keep alive: idle={idle_time + self.interval}s, "
                     f"keep_alive={model.keep_alive_seconds}s"
                 )
-                return  # Don't scale down yet
+                return
             else:
-                # Keep alive expired, allow scale down
-                self._model_idle_times[model.id] = 0
+                self._model_idle_times[key] = 0
         else:
-            # Reset idle time if there's demand or we're scaling up
-            self._model_idle_times[model.id] = 0
+            self._model_idle_times[key] = 0
 
-        # Update if changed
         if desired != current_desired:
             logger.info(
-                f"[{model.id}] Scaling: demand={total_demand} "
+                f"[{key}] Scaling: demand={total_demand} "
                 f"(buffer={buffer_length}, in_flight={in_flight_count}), "
                 f"desired={current_desired} -> {desired}"
             )
-            self.database.update_desired_replicas(model.id, desired)
+            self.database.update_desired_replicas(
+                model.model_name, model.backend, desired
+            )
 
 
 # Global instance

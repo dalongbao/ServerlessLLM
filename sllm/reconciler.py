@@ -140,10 +140,10 @@ class Reconciler:
                 await self._reconcile_model(model)
             except Exception as e:
                 logger.error(
-                    f"Error reconciling {model.id}: {e}", exc_info=True
+                    f"Error reconciling ({model.model_name}, {model.backend}): {e}",
+                    exc_info=True,
                 )
 
-        # Also clean up models marked for deletion
         deleting_models = [
             m for m in self.database.get_all_models() if m.status == "deleting"
         ]
@@ -152,7 +152,8 @@ class Reconciler:
                 await self._cleanup_deleting_model(model)
             except Exception as e:
                 logger.error(
-                    f"Error cleaning up {model.id}: {e}", exc_info=True
+                    f"Error cleaning up ({model.model_name}, {model.backend}): {e}",
+                    exc_info=True,
                 )
 
     async def _reconcile_model(self, model: Model):
@@ -163,66 +164,62 @@ class Reconciler:
             model: Model to reconcile
         """
         desired = model.desired_replicas
+        key = (model.model_name, model.backend)
 
-        # Get current state from Pylet
-        instances = await self.pylet_client.get_model_instances(model.id)
+        instances = await self.pylet_client.get_model_instances(
+            model.model_name, model.backend
+        )
 
-        # Get endpoints from database
-        db_endpoints = set(self.database.get_model_endpoints(model.id))
+        db_endpoints = set(
+            self.database.get_model_endpoints(model.model_name, model.backend)
+        )
 
-        # Categorize instances
         state = self._categorize_instances(instances, db_endpoints)
 
-        # Log state
         logger.debug(
-            f"[{model.id}] desired={desired}, ready={len(state.ready)}, "
+            f"[{key}] desired={desired}, ready={len(state.ready)}, "
             f"starting={len(state.starting)}, failed={len(state.failed)}"
         )
 
-        # 1. Clean up failed instances
         for inst in state.failed:
-            await self._cleanup_instance(model.id, inst)
+            await self._cleanup_instance(model, inst)
 
-        # 2. Health check starting instances
         for inst in list(state.starting):
             if inst.status == "RUNNING":
                 if await self._is_healthy(inst.endpoint):
-                    # Add to model_endpoints table
-                    self.database.add_model_endpoint(model.id, inst.endpoint)
+                    self.database.add_model_endpoint(
+                        model.model_name, model.backend, inst.endpoint
+                    )
                     state.starting.remove(inst)
                     state.ready.append(inst)
                     self._startup_times.pop(inst.instance_id, None)
                     logger.info(
-                        f"[{model.id}] Instance {inst.instance_id} is now ready "
+                        f"[{key}] Instance {inst.instance_id} is now ready "
                         f"at {inst.endpoint}"
                     )
                 elif self._is_startup_timeout(inst.instance_id):
-                    # Startup timeout - clean up
                     logger.warning(
-                        f"[{model.id}] Instance {inst.instance_id} startup timeout"
+                        f"[{key}] Instance {inst.instance_id} startup timeout"
                     )
-                    await self._cleanup_instance(model.id, inst)
+                    await self._cleanup_instance(model, inst)
                     state.starting.remove(inst)
 
-        # 3. Scale up if needed
         current_or_starting = len(state.ready) + len(state.starting)
         need = desired - current_or_starting
 
         if need > 0:
-            logger.info(f"[{model.id}] Scaling up: need {need} more instances")
+            logger.info(f"[{key}] Scaling up: need {need} more instances")
             for _ in range(need):
                 await self._create_instance(model, state.ready + state.starting)
 
-        # 4. Scale down if needed (only from ready, not starting)
         excess = len(state.ready) - desired
         if excess > 0 and len(state.starting) == 0:
-            logger.info(f"[{model.id}] Scaling down: {excess} excess instances")
-            # Prefer to remove instances NOT on nodes with cached models
+            logger.info(f"[{key}] Scaling down: {excess} excess instances")
             instances_to_remove = self._select_instances_to_remove(
                 model.model_name, state.ready, excess
             )
             for inst in instances_to_remove:
-                await self._remove_instance(model.id, inst)
+                await self._remove_instance(model, inst)
 
     def _categorize_instances(
         self,
@@ -312,37 +309,32 @@ class Reconciler:
             model: Model to create instance for
             existing: Existing instances for storage-aware placement
         """
-        # Get backend config
         backend_config = model.backend_config or {}
         tp = backend_config.get("tensor_parallel_size", 1)
+        key = (model.model_name, model.backend)
 
-        # Select best node
         node = await self.storage_manager.select_best_node(
             model.model_name, tp, existing
         )
         if not node:
-            logger.warning(f"[{model.id}] No suitable node for new instance")
+            logger.warning(f"[{key}] No suitable node for new instance")
             return
 
-        # Ensure sllm-store is running on node
         store_endpoint = await self.storage_manager.ensure_store_on_node(node)
         if not store_endpoint:
-            logger.warning(f"[{model.id}] Failed to start sllm-store on {node}")
+            logger.warning(f"[{key}] Failed to start sllm-store on {node}")
             return
 
-        # Select GPU indices
         gpu_indices = await self.storage_manager.select_gpu_indices(node, tp)
         if not gpu_indices:
-            logger.warning(f"[{model.id}] Not enough GPUs on {node}")
+            logger.warning(f"[{key}] Not enough GPUs on {node}")
             return
 
-        # Build command
         if model.backend == "sglang":
             command = build_sglang_command(model, self.storage_path)
         else:
             command = build_vllm_command(model, self.storage_path)
 
-        # Create instance via Pylet
         try:
             import uuid
 
@@ -356,7 +348,8 @@ class Reconciler:
                 gpu_indices=gpu_indices,
                 exclusive=True,
                 labels={
-                    "model_id": model.id,
+                    "model_name": model.model_name,
+                    "backend": model.backend,
                     "type": "inference",
                     "node": node,
                 },
@@ -367,44 +360,42 @@ class Reconciler:
             )
 
             logger.info(
-                f"[{model.id}] Created instance {instance.instance_id} "
+                f"[{key}] Created instance {instance.instance_id} "
                 f"on {node} with GPUs {gpu_indices}"
             )
 
         except Exception as e:
-            logger.error(f"[{model.id}] Failed to create instance: {e}")
+            logger.error(f"[{key}] Failed to create instance: {e}")
 
-    async def _cleanup_instance(self, model_id: str, inst: InstanceInfo):
+    async def _cleanup_instance(self, model: Model, inst: InstanceInfo):
         """Clean up a failed or timed-out instance."""
-        # Remove from model_endpoints table
         if inst.endpoint:
-            self.database.remove_model_endpoint(model_id, inst.endpoint)
+            self.database.remove_model_endpoint(
+                model.model_name, model.backend, inst.endpoint
+            )
 
-        # Cancel in Pylet
         try:
             await self.pylet_client.cancel_instance(inst.instance_id)
         except Exception as e:
             logger.warning(f"Failed to cancel instance {inst.instance_id}: {e}")
 
-        # Clean up tracking
         self._startup_times.pop(inst.instance_id, None)
 
         logger.info(f"Cleaned up instance {inst.instance_id}")
 
-    async def _remove_instance(self, model_id: str, inst: InstanceInfo):
+    async def _remove_instance(self, model: Model, inst: InstanceInfo):
         """Remove an instance during scale-down with graceful draining.
 
         Removes endpoint from model_endpoints table first (Router stops
         sending new requests), waits briefly, then cancels the instance.
         """
-        # Remove from model_endpoints table (Router will stop sending requests)
         if inst.endpoint:
-            self.database.remove_model_endpoint(model_id, inst.endpoint)
+            self.database.remove_model_endpoint(
+                model.model_name, model.backend, inst.endpoint
+            )
 
-            # Wait briefly for in-flight requests to complete
             await asyncio.sleep(2.0)
 
-        # Cancel in Pylet
         try:
             await self.pylet_client.cancel_instance(inst.instance_id)
         except Exception as e:
@@ -449,18 +440,22 @@ class Reconciler:
 
     async def _cleanup_deleting_model(self, model: Model):
         """Clean up a model marked for deletion."""
-        instances = await self.pylet_client.get_model_instances(model.id)
+        instances = await self.pylet_client.get_model_instances(
+            model.model_name, model.backend
+        )
 
         if not instances:
-            # All instances gone - remove endpoints and delete from database
-            self.database.remove_model_endpoints(model.id)
-            self.database.delete_model(model.id)
-            logger.info(f"Completed deletion of {model.id}")
+            self.database.remove_model_endpoints(
+                model.model_name, model.backend
+            )
+            self.database.delete_model(model.model_name, model.backend)
+            logger.info(
+                f"Completed deletion of ({model.model_name}, {model.backend})"
+            )
             return
 
-        # Cancel remaining instances
         for inst in instances:
-            await self._cleanup_instance(model.id, inst)
+            await self._cleanup_instance(model, inst)
 
 
 # Global instance

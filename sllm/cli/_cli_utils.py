@@ -518,8 +518,8 @@ def show_status():
                 if models:
                     print("Model status retrieved successfully:")
                     for model in models:
-                        if isinstance(model, dict) and "id" in model:
-                            print(f"- {model['id']}")
+                        if isinstance(model, dict) and "model" in model:
+                            print(f"- ({model['model']}, {model.get('backend', 'vllm')})")
                         else:
                             print(f"- {model}")
                 else:

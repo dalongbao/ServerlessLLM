@@ -64,7 +64,8 @@ class RouterConfig:
 class BufferedRequest:
     """A request waiting in the cold-start buffer."""
 
-    model_id: str
+    model_name: str
+    backend: str
     payload: Dict[str, Any]
     path: str
     future: asyncio.Future = field(default_factory=asyncio.Future)
@@ -100,11 +101,10 @@ class Router:
         self.database = database
         self.config = config or RouterConfig()
 
-        # Ephemeral state (lost on restart)
-        self._round_robin_idx: Dict[str, int] = defaultdict(int)
-        self._round_robin_indices = self._round_robin_idx  # Alias for tests
-        self._buffers: Dict[str, asyncio.Queue[BufferedRequest]] = {}
-        self._in_flight: Dict[str, int] = defaultdict(int)
+        self._round_robin_idx: Dict[tuple, int] = defaultdict(int)
+        self._round_robin_indices = self._round_robin_idx
+        self._buffers: Dict[tuple, asyncio.Queue[BufferedRequest]] = {}
+        self._in_flight: Dict[tuple, int] = defaultdict(int)
 
         # Autoscaler reference (set after initialization)
         self._autoscaler: Optional[AutoScaler] = autoscaler
@@ -161,7 +161,8 @@ class Router:
         self,
         payload: Dict[str, Any],
         path: str = "/v1/chat/completions",
-        model_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        backend: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Handle an inference request for a model.
@@ -173,8 +174,8 @@ class Router:
         Args:
             payload: Request payload (JSON body)
             path: API path (e.g., "/v1/chat/completions")
-            model_id: Optional model identifier. If not provided,
-                      extracted from payload["model"]
+            model_name: Model name
+            backend: Backend type
 
         Returns:
             Response from the backend
@@ -182,36 +183,38 @@ class Router:
         Raises:
             Exception: On timeout or forwarding failure
         """
-        # Extract model_id from payload if not provided
-        if model_id is None:
-            model_id = self._extract_model_id(payload)
+        if model_name is None:
+            model_name = payload.get("model")
+        if backend is None:
+            backend = payload.get("backend", "vllm")
 
-        # Ensure session exists
+        if not model_name:
+            raise ValueError("Request must include a 'model' field")
+
+        key = (model_name, backend)
+
         if self._session is None:
             self._session = aiohttp.ClientSession()
 
-        # Read endpoints from SQLite (every request, no cache)
-        endpoints = self.database.get_model_endpoints(model_id)
+        endpoints = self.database.get_model_endpoints(model_name, backend)
 
         if endpoints:
-            # Warm path: forward immediately
-            endpoint = self._select_next_endpoint(model_id, endpoints)
+            endpoint = self._select_next_endpoint(key, endpoints)
             return await self._forward_to_endpoint(
-                model_id, endpoint, payload, path
+                key, endpoint, payload, path
             )
         else:
-            # Cold path: buffer and wait
-            return await self._buffer_and_wait(model_id, payload, path)
+            return await self._buffer_and_wait(key, payload, path)
 
-    def _select_next_endpoint(self, model_id: str, endpoints: List[str]) -> str:
+    def _select_next_endpoint(self, key: tuple, endpoints: List[str]) -> str:
         """Select the next endpoint using round-robin."""
-        idx = self._round_robin_idx[model_id] % len(endpoints)
-        self._round_robin_idx[model_id] += 1
+        idx = self._round_robin_idx[key] % len(endpoints)
+        self._round_robin_idx[key] += 1
         return endpoints[idx]
 
     async def _forward_to_endpoint(
         self,
-        model_id: str,
+        key: tuple,
         endpoint: str,
         payload: Dict[str, Any],
         path: str,
@@ -219,9 +222,8 @@ class Router:
         """Forward request to a specific endpoint."""
         url = f"http://{endpoint}{path}"
 
-        # Track in-flight
-        self._in_flight[model_id] += 1
-        self._push_metrics(model_id)
+        self._in_flight[key] += 1
+        self._push_metrics(key)
 
         try:
             async with self._session.post(
@@ -235,67 +237,61 @@ class Router:
 
                 if resp.status >= 500:
                     logger.warning(
-                        f"[{model_id}] Endpoint {endpoint} returned "
+                        f"[{key}] Endpoint {endpoint} returned "
                         f"status {resp.status}"
                     )
-                    # Router does NOT mark endpoint unhealthy
-                    # (reconciler owns this based on Pylet heartbeats)
 
                 return result
 
         except aiohttp.ClientError as e:
-            logger.error(f"[{model_id}] Request to {endpoint} failed: {e}")
+            logger.error(f"[{key}] Request to {endpoint} failed: {e}")
 
-            # Retry on another endpoint if available and configured
             if self.config.retry_failed_endpoint:
-                endpoints = self.database.get_model_endpoints(model_id)
-                # Filter out the failed endpoint
+                endpoints = self.database.get_model_endpoints(key[0], key[1])
                 other_endpoints = [ep for ep in endpoints if ep != endpoint]
                 if other_endpoints:
                     other_endpoint = self._select_next_endpoint(
-                        model_id, other_endpoints
+                        key, other_endpoints
                     )
                     logger.info(
-                        f"[{model_id}] Retrying on endpoint {other_endpoint}"
+                        f"[{key}] Retrying on endpoint {other_endpoint}"
                     )
-                    # Decrement in-flight before retry (will be incremented again)
-                    self._in_flight[model_id] -= 1
+                    self._in_flight[key] -= 1
                     return await self._forward_to_endpoint(
-                        model_id, other_endpoint, payload, path
+                        key, other_endpoint, payload, path
                     )
 
             raise Exception(f"Failed to forward request: {e}")
 
         except asyncio.TimeoutError:
-            logger.error(f"[{model_id}] Request to {endpoint} timed out")
+            logger.error(f"[{key}] Request to {endpoint} timed out")
             raise Exception(
                 f"Request timeout after {self.config.request_timeout}s"
             )
 
         finally:
-            self._in_flight[model_id] -= 1
-            self._push_metrics(model_id)
+            self._in_flight[key] -= 1
+            self._push_metrics(key)
 
     async def _buffer_and_wait(
         self,
-        model_id: str,
+        key: tuple,
         payload: Dict[str, Any],
         path: str,
     ) -> Dict[str, Any]:
         """Buffer request during cold start and wait for result."""
-        # Get or create buffer for model
-        if model_id not in self._buffers:
-            self._buffers[model_id] = asyncio.Queue(
+        if key not in self._buffers:
+            self._buffers[key] = asyncio.Queue(
                 maxsize=self.config.max_buffer_size
             )
 
-        buffer = self._buffers[model_id]
+        buffer = self._buffers[key]
 
-        # Create request with future
         loop = asyncio.get_event_loop()
         future = loop.create_future()
         request = BufferedRequest(
-            model_id=model_id,
+            model_name=key[0],
+            backend=key[1],
             payload=payload,
             path=path,
             future=future,
@@ -304,11 +300,11 @@ class Router:
         try:
             buffer.put_nowait(request)
             logger.info(
-                f"[{model_id}] Buffered request (buffer size: {buffer.qsize()})"
+                f"[{key}] Buffered request (buffer size: {buffer.qsize()})"
             )
-            self._push_metrics(model_id)
+            self._push_metrics(key)
         except asyncio.QueueFull:
-            logger.warning(f"[{model_id}] Buffer full, rejecting request")
+            logger.warning(f"[{key}] Buffer full, rejecting request")
             raise Exception("Service overloaded - buffer full")
 
         try:
@@ -317,7 +313,7 @@ class Router:
             )
         except asyncio.TimeoutError:
             logger.error(
-                f"[{model_id}] Cold start timeout after "
+                f"[{key}] Cold start timeout after "
                 f"{self.config.cold_start_timeout}s"
             )
             raise Exception(
@@ -331,24 +327,24 @@ class Router:
 
         while not self._shutdown:
             try:
-                # Check all buffers
-                for model_id, buffer in list(self._buffers.items()):
+                for key, buffer in list(self._buffers.items()):
                     if not buffer.empty():
-                        # Read endpoints from SQLite
-                        endpoints = self.database.get_model_endpoints(model_id)
+                        endpoints = self.database.get_model_endpoints(
+                            key[0], key[1]
+                        )
                         if endpoints:
                             try:
                                 request = buffer.get_nowait()
                                 endpoint = self._select_next_endpoint(
-                                    model_id, endpoints
+                                    key, endpoints
                                 )
                                 logger.info(
-                                    f"[{model_id}] Draining buffered request "
+                                    f"[{key}] Draining buffered request "
                                     f"to {endpoint}"
                                 )
                                 try:
                                     result = await self._forward_to_endpoint(
-                                        model_id,
+                                        key,
                                         endpoint,
                                         request.payload,
                                         request.path,
@@ -371,15 +367,16 @@ class Router:
 
         logger.debug("Buffer drain loop stopped")
 
-    def _push_metrics(self, model_id: str):
+    def _push_metrics(self, key: tuple):
         """Push metrics immediately to autoscaler."""
         if self._autoscaler:
-            buffer = self._buffers.get(model_id)
+            buffer = self._buffers.get(key)
             buffer_len = buffer.qsize() if buffer else 0
-            in_flight = self._in_flight.get(model_id, 0)
+            in_flight = self._in_flight.get(key, 0)
 
             self._autoscaler.receive_metrics(
-                model_id=model_id,
+                model_name=key[0],
+                backend=key[1],
                 buffer_len=buffer_len,
                 in_flight=in_flight,
             )
@@ -388,40 +385,39 @@ class Router:
     # Metrics Access (for status endpoints)
     # -------------------------------------------------------------------------
 
-    def get_buffer_length(self, model_id: str) -> int:
+    def get_buffer_length(self, model_name: str, backend: str) -> int:
         """Get the buffer length for a model."""
-        buffer = self._buffers.get(model_id)
+        key = (model_name, backend)
+        buffer = self._buffers.get(key)
         return buffer.qsize() if buffer else 0
 
-    def get_in_flight(self, model_id: str) -> int:
+    def get_in_flight(self, model_name: str, backend: str) -> int:
         """Get the in-flight count for a model."""
-        return self._in_flight.get(model_id, 0)
+        key = (model_name, backend)
+        return self._in_flight.get(key, 0)
 
-    def get_total_demand(self, model_id: str) -> int:
+    def get_total_demand(self, model_name: str, backend: str) -> int:
         """Get total demand (buffer + in-flight) for a model."""
-        return self.get_buffer_length(model_id) + self.get_in_flight(model_id)
+        return (
+            self.get_buffer_length(model_name, backend)
+            + self.get_in_flight(model_name, backend)
+        )
 
-    def get_in_flight_count(self, model_id: str) -> int:
+    def get_in_flight_count(self, model_name: str, backend: str) -> int:
         """Alias for get_in_flight (for test compatibility)."""
-        return self.get_in_flight(model_id)
+        return self.get_in_flight(model_name, backend)
 
-    def _select_endpoint(self, model_id: str) -> Optional[str]:
+    def _select_endpoint(self, model_name: str, backend: str) -> Optional[str]:
         """Select an endpoint using round-robin (sync version for tests)."""
-        endpoints = self.database.get_model_endpoints(model_id)
+        endpoints = self.database.get_model_endpoints(model_name, backend)
         if not endpoints:
             return None
-        return self._select_next_endpoint(model_id, endpoints)
+        key = (model_name, backend)
+        return self._select_next_endpoint(key, endpoints)
 
-    def _extract_model_id(self, payload: Dict[str, Any]) -> str:
-        """Extract model ID from request payload."""
-        model_id = payload.get("model")
-        if not model_id:
-            raise ValueError("Request payload must include a 'model' field")
-        return model_id
-
-    def get_endpoint_count(self, model_id: str) -> int:
+    def get_endpoint_count(self, model_name: str, backend: str) -> int:
         """Get the number of healthy endpoints for a model (from SQLite)."""
-        endpoints = self.database.get_model_endpoints(model_id)
+        endpoints = self.database.get_model_endpoints(model_name, backend)
         return len(endpoints)
 
     # -------------------------------------------------------------------------
@@ -439,16 +435,13 @@ class Router:
         start_time = asyncio.get_event_loop().time()
         all_drained = False
         while asyncio.get_event_loop().time() - start_time < timeout:
-            # Check all models with buffers OR in-flight requests
-            all_model_ids = set(self._buffers.keys()) | set(
-                self._in_flight.keys()
-            )
+            all_keys = set(self._buffers.keys()) | set(self._in_flight.keys())
 
             all_drained = True
-            for model_id in all_model_ids:
+            for key in all_keys:
                 if (
-                    self.get_buffer_length(model_id) > 0
-                    or self.get_in_flight(model_id) > 0
+                    self.get_buffer_length(key[0], key[1]) > 0
+                    or self.get_in_flight(key[0], key[1]) > 0
                 ):
                     all_drained = False
                     break
@@ -456,7 +449,7 @@ class Router:
             if all_drained:
                 break
 
-            await asyncio.sleep(0.05)  # Check more frequently
+            await asyncio.sleep(0.05)
 
         if not all_drained:
             logger.warning("Router drain timeout")
@@ -465,7 +458,7 @@ class Router:
 
     def __repr__(self) -> str:
         total_buffer = sum(
-            self.get_buffer_length(m) for m in self._buffers.keys()
+            self.get_buffer_length(k[0], k[1]) for k in self._buffers.keys()
         )
         total_inflight = sum(self._in_flight.values())
         return f"Router(buffer={total_buffer}, in_flight={total_inflight})"

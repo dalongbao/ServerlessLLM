@@ -35,17 +35,16 @@ from sllm.logger import init_logger
 logger = init_logger(__name__)
 
 # Schema version for migrations
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
 class Model:
     """Model configuration and scaling state."""
 
-    id: str  # "meta-llama/Llama-3.1-8B:vllm"
-    model_name: str  # "meta-llama/Llama-3.1-8B"
-    backend: str  # "vllm" or "sglang"
-    status: str  # "active", "deleting"
+    model_name: str
+    backend: str
+    status: str
     desired_replicas: int
     min_replicas: int
     max_replicas: int
@@ -126,6 +125,8 @@ class Database:
             self._migrate_v1(conn)
         if from_version < 2:
             self._migrate_v2(conn)
+        if from_version < 3:
+            self._migrate_v3(conn)
 
         # Update schema version
         conn.execute("DELETE FROM schema_version")
@@ -137,10 +138,8 @@ class Database:
 
     def _migrate_v1(self, conn: sqlite3.Connection):
         """Create initial v1 schema."""
-        # Models table - model configuration and scaling state
         conn.execute("""
             CREATE TABLE IF NOT EXISTS models (
-                id TEXT PRIMARY KEY,
                 model_name TEXT NOT NULL,
                 backend TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
@@ -151,7 +150,8 @@ class Database:
                 keep_alive_seconds INTEGER DEFAULT 0,
                 backend_config TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (model_name, backend)
             )
         """)
 
@@ -175,23 +175,31 @@ class Database:
 
     def _migrate_v2(self, conn: sqlite3.Connection):
         """Add model_endpoints table for router."""
-        # Model endpoints table - tracks healthy endpoints for each model
         conn.execute("""
             CREATE TABLE IF NOT EXISTS model_endpoints (
-                model_id TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                backend TEXT NOT NULL,
                 endpoint TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'healthy',
                 added_at TEXT NOT NULL,
-                PRIMARY KEY (model_id, endpoint)
+                PRIMARY KEY (model_name, backend, endpoint)
             )
         """)
 
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_model_endpoints_model_id
-            ON model_endpoints(model_id)
+            CREATE INDEX IF NOT EXISTS idx_model_endpoints_model
+            ON model_endpoints(model_name, backend)
         """)
 
         logger.info("Created v2 schema: model_endpoints table")
+
+    def _migrate_v3(self, conn: sqlite3.Connection):
+        """Migrate to (model_name, backend) composite keys."""
+        conn.execute("DROP TABLE IF EXISTS models")
+        conn.execute("DROP TABLE IF EXISTS model_endpoints")
+        self._migrate_v1(conn)
+        self._migrate_v2(conn)
+        logger.info("Migrated to v3 schema: composite keys")
 
     # -------------------------------------------------------------------------
     # Model CRUD Operations
@@ -199,7 +207,6 @@ class Database:
 
     def create_model(
         self,
-        model_id: str,
         model_name: str,
         backend: str,
         min_replicas: int = 0,
@@ -220,16 +227,15 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO models (
-                    id, model_name, backend, status, desired_replicas,
+                    model_name, backend, status, desired_replicas,
                     min_replicas, max_replicas, target_pending_requests,
                     keep_alive_seconds, backend_config, created_at, updated_at
-                ) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    model_id,
                     model_name,
                     backend,
-                    min_replicas,  # desired starts at min
+                    min_replicas,
                     min_replicas,
                     max_replicas,
                     target_pending_requests,
@@ -240,17 +246,26 @@ class Database:
                 ),
             )
         except sqlite3.IntegrityError:
-            raise ValueError(f"Model {model_id} already exists")
+            raise ValueError(f"Model ({model_name}, {backend}) already exists")
 
-        logger.info(f"Created model {model_id}")
-        return self.get_model(model_id)
+        logger.info(f"Created model ({model_name}, {backend})")
+        return self.get_model(model_name, backend)
 
-    def get_model(self, model_id: str) -> Optional[Model]:
-        """Get a model by ID."""
+    def get_model(
+        self, model_name: str, backend: Optional[str] = None
+    ) -> Optional[Model]:
+        """Get a model by model_name and optionally backend."""
         conn = self._get_connection()
-        row = conn.execute(
-            "SELECT * FROM models WHERE id = ?", (model_id,)
-        ).fetchone()
+        if backend:
+            row = conn.execute(
+                "SELECT * FROM models WHERE model_name = ? AND backend = ?",
+                (model_name, backend),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM models WHERE model_name = ?",
+                (model_name,),
+            ).fetchone()
 
         if not row:
             return None
@@ -271,7 +286,9 @@ class Database:
         ).fetchall()
         return [self._row_to_model(row) for row in rows]
 
-    def update_desired_replicas(self, model_id: str, desired: int) -> bool:
+    def update_desired_replicas(
+        self, model_name: str, backend: str, desired: int
+    ) -> bool:
         """Update desired_replicas for a model. Returns True if updated."""
         conn = self._get_connection()
         now = datetime.now(timezone.utc).isoformat()
@@ -280,14 +297,16 @@ class Database:
             """
             UPDATE models
             SET desired_replicas = ?, updated_at = ?
-            WHERE id = ? AND status = 'active'
+            WHERE model_name = ? AND backend = ? AND status = 'active'
             """,
-            (desired, now, model_id),
+            (desired, now, model_name, backend),
         )
 
         return cursor.rowcount > 0
 
-    def update_model_status(self, model_id: str, status: str) -> bool:
+    def update_model_status(
+        self, model_name: str, backend: str, status: str
+    ) -> bool:
         """Update model status. Returns True if updated."""
         conn = self._get_connection()
         now = datetime.now(timezone.utc).isoformat()
@@ -296,23 +315,28 @@ class Database:
             """
             UPDATE models
             SET status = ?, updated_at = ?
-            WHERE id = ?
+            WHERE model_name = ? AND backend = ?
             """,
-            (status, now, model_id),
+            (status, now, model_name, backend),
         )
 
         if cursor.rowcount > 0:
-            logger.info(f"Model {model_id} status changed to {status}")
+            logger.info(
+                f"Model ({model_name}, {backend}) status changed to {status}"
+            )
             return True
         return False
 
-    def delete_model(self, model_id: str) -> bool:
+    def delete_model(self, model_name: str, backend: str) -> bool:
         """Delete a model. Returns True if deleted."""
         conn = self._get_connection()
-        cursor = conn.execute("DELETE FROM models WHERE id = ?", (model_id,))
+        cursor = conn.execute(
+            "DELETE FROM models WHERE model_name = ? AND backend = ?",
+            (model_name, backend),
+        )
 
         if cursor.rowcount > 0:
-            logger.info(f"Deleted model {model_id}")
+            logger.info(f"Deleted model ({model_name}, {backend})")
             return True
         return False
 
@@ -323,7 +347,6 @@ class Database:
             backend_config = json.loads(row["backend_config"])
 
         return Model(
-            id=row["id"],
             model_name=row["model_name"],
             backend=row["backend"],
             status=row["status"],
@@ -428,89 +451,107 @@ class Database:
     # Model Endpoints Operations (for Router)
     # -------------------------------------------------------------------------
 
-    def get_model_endpoints(self, model_id: str) -> List[str]:
+    def get_model_endpoints(self, model_name: str, backend: str) -> List[str]:
         """Get healthy endpoints for a model. Called by Router."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT endpoint FROM model_endpoints "
-            "WHERE model_id = ? AND status = 'healthy'",
-            (model_id,),
+            "WHERE model_name = ? AND backend = ? AND status = 'healthy'",
+            (model_name, backend),
         ).fetchall()
         return [row[0] for row in rows]
 
-    def add_model_endpoint(self, model_id: str, endpoint: str):
+    def add_model_endpoint(
+        self, model_name: str, backend: str, endpoint: str
+    ):
         """Add endpoint. Called by Reconciler."""
         conn = self._get_connection()
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "INSERT OR REPLACE INTO model_endpoints "
-            "(model_id, endpoint, status, added_at) VALUES (?, ?, 'healthy', ?)",
-            (model_id, endpoint, now),
+            "(model_name, backend, endpoint, status, added_at) "
+            "VALUES (?, ?, ?, 'healthy', ?)",
+            (model_name, backend, endpoint, now),
         )
-        logger.debug(f"Added endpoint {endpoint} for {model_id}")
+        logger.debug(
+            f"Added endpoint {endpoint} for ({model_name}, {backend})"
+        )
 
-    def remove_model_endpoint(self, model_id: str, endpoint: str):
+    def remove_model_endpoint(
+        self, model_name: str, backend: str, endpoint: str
+    ):
         """Remove endpoint. Called by Reconciler."""
         conn = self._get_connection()
         cursor = conn.execute(
-            "DELETE FROM model_endpoints WHERE model_id = ? AND endpoint = ?",
-            (model_id, endpoint),
+            "DELETE FROM model_endpoints "
+            "WHERE model_name = ? AND backend = ? AND endpoint = ?",
+            (model_name, backend, endpoint),
         )
         if cursor.rowcount > 0:
-            logger.debug(f"Removed endpoint {endpoint} for {model_id}")
+            logger.debug(
+                f"Removed endpoint {endpoint} for ({model_name}, {backend})"
+            )
 
-    def mark_endpoint_unhealthy(self, model_id: str, endpoint: str):
+    def mark_endpoint_unhealthy(
+        self, model_name: str, backend: str, endpoint: str
+    ):
         """Mark endpoint unhealthy. Called by Reconciler."""
         conn = self._get_connection()
         conn.execute(
             "UPDATE model_endpoints SET status = 'unhealthy' "
-            "WHERE model_id = ? AND endpoint = ?",
-            (model_id, endpoint),
+            "WHERE model_name = ? AND backend = ? AND endpoint = ?",
+            (model_name, backend, endpoint),
         )
-        logger.debug(f"Marked endpoint {endpoint} unhealthy for {model_id}")
+        logger.debug(
+            f"Marked endpoint {endpoint} unhealthy for ({model_name}, {backend})"
+        )
 
-    def remove_model_endpoints(self, model_id: str):
+    def remove_model_endpoints(self, model_name: str, backend: str):
         """Remove all endpoints for a model. Called during model deletion."""
         conn = self._get_connection()
         cursor = conn.execute(
-            "DELETE FROM model_endpoints WHERE model_id = ?",
-            (model_id,),
+            "DELETE FROM model_endpoints WHERE model_name = ? AND backend = ?",
+            (model_name, backend),
         )
         if cursor.rowcount > 0:
-            logger.debug(f"Removed {cursor.rowcount} endpoints for {model_id}")
+            logger.debug(
+                f"Removed {cursor.rowcount} endpoints for ({model_name}, {backend})"
+            )
 
-    def get_all_endpoints_for_model(self, model_id: str) -> List[dict]:
+    def get_all_endpoints_for_model(
+        self, model_name: str, backend: str
+    ) -> List[dict]:
         """Get all endpoints (including unhealthy) for a model."""
         conn = self._get_connection()
         rows = conn.execute(
             "SELECT endpoint, status, added_at FROM model_endpoints "
-            "WHERE model_id = ?",
-            (model_id,),
+            "WHERE model_name = ? AND backend = ?",
+            (model_name, backend),
         ).fetchall()
         return [
             {"endpoint": row[0], "status": row[1], "added_at": row[2]}
             for row in rows
         ]
 
-    def get_all_healthy_endpoints(self) -> Dict[str, List[str]]:
-        """Get all healthy endpoints grouped by model ID."""
+    def get_all_healthy_endpoints(self) -> Dict[tuple, List[str]]:
+        """Get all healthy endpoints grouped by (model_name, backend)."""
         conn = self._get_connection()
         rows = conn.execute(
-            "SELECT model_id, endpoint FROM model_endpoints "
+            "SELECT model_name, backend, endpoint FROM model_endpoints "
             "WHERE status = 'healthy'"
         ).fetchall()
 
-        result: Dict[str, List[str]] = {}
+        result: Dict[tuple, List[str]] = {}
         for row in rows:
-            model_id, endpoint = row[0], row[1]
-            if model_id not in result:
-                result[model_id] = []
-            result[model_id].append(endpoint)
+            key = (row[0], row[1])
+            if key not in result:
+                result[key] = []
+            result[key].append(row[2])
         return result
 
-    def delete_model_endpoints(self, model_id: str):
+    def delete_model_endpoints(self, model_name: str, backend: str):
         """Alias for remove_model_endpoints (for test compatibility)."""
-        return self.remove_model_endpoints(model_id)
+        return self.remove_model_endpoints(model_name, backend)
 
     # -------------------------------------------------------------------------
     # Utility Methods

@@ -61,9 +61,14 @@ class InstanceInfo:
     failure_reason: Optional[str]
 
     @property
-    def model_id(self) -> Optional[str]:
-        """Get model_id from labels."""
-        return self.labels.get("model_id")
+    def model_name(self) -> Optional[str]:
+        """Get model_name from labels."""
+        return self.labels.get("model_name")
+
+    @property
+    def backend(self) -> Optional[str]:
+        """Get backend from labels."""
+        return self.labels.get("backend")
 
     @property
     def node(self) -> Optional[str]:
@@ -290,16 +295,20 @@ class PyletClient:
     # SLLM-Specific Helpers
     # -------------------------------------------------------------------------
 
-    async def get_model_instances(self, model_id: str) -> List[InstanceInfo]:
+    async def get_model_instances(
+        self, model_name: str, backend: str
+    ) -> List[InstanceInfo]:
         """Get all instances for a model."""
-        return await self.list_instances(label=f"model_id:{model_id}")
+        return await self.list_instances(
+            labels=[f"model_name:{model_name}", f"backend:{backend}"]
+        )
 
     async def get_running_model_instances(
-        self, model_id: str
+        self, model_name: str, backend: str
     ) -> List[InstanceInfo]:
         """Get running instances for a model."""
         return await self.list_instances(
-            label=f"model_id:{model_id}",
+            labels=[f"model_name:{model_name}", f"backend:{backend}"],
             status="RUNNING",
         )
 
