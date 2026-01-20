@@ -35,6 +35,7 @@ from typing import Dict, List, Optional, Set
 
 from sllm.command_builder import VENV_SLLM_STORE
 from sllm.database import Database, NodeStorage
+from sllm.loading_queue import LoadingQueueManager
 from sllm.logger import init_logger
 from sllm.pylet_client import InstanceInfo, PyletClient, WorkerInfo
 
@@ -88,6 +89,13 @@ class StorageManager:
         self._cache_view: Dict[str, Set[str]] = {}  # node_name -> set of models
         self._store_endpoints: Dict[str, str] = {}  # node_name -> endpoint
         self._download_locks: Dict[str, asyncio.Lock] = {}
+
+        # Loading queue for coordinated instance creation
+        # Executor is set by Reconciler which owns instance lifecycle
+        self.loading_queue = LoadingQueueManager(
+            max_concurrent_per_node=2,
+            process_interval=1.0,
+        )
 
     async def recover_from_db(self):
         """Recover state from database on startup."""
@@ -152,6 +160,9 @@ class StorageManager:
             f"sllm-store initialization complete: "
             f"{success_count} succeeded, {failure_count} failed"
         )
+
+        # Start loading queue processor
+        await self.loading_queue.start()
 
         return failure_count == 0
 
@@ -265,17 +276,14 @@ class StorageManager:
         Returns:
             Endpoint (ip:port) or None if not running
         """
-        # Check in-memory cache first
         if node_name in self._store_endpoints:
             return self._store_endpoints[node_name]
 
-        # Check database
         node_storage = self.database.get_node_storage(node_name)
         if node_storage and node_storage.sllm_store_endpoint:
             self._store_endpoints[node_name] = node_storage.sllm_store_endpoint
             return node_storage.sllm_store_endpoint
 
-        # Check Pylet
         endpoint = await self.pylet_client.get_store_endpoint(node_name)
         if endpoint:
             self._store_endpoints[node_name] = endpoint
@@ -525,11 +533,9 @@ class StorageManager:
         )
         if final and final.status == "COMPLETED":
             logger.info(f"Downloaded {model_name} on {node_name}")
-            # Update cache view so subsequent calls know the model is available
             if node_name not in self._cache_view:
                 self._cache_view[node_name] = set()
             self._cache_view[node_name].add(model_name)
-            # Persist to database
             self.database.upsert_node_storage(
                 node_name=node_name,
                 sllm_store_endpoint=self._store_endpoints.get(node_name),
@@ -561,17 +567,15 @@ class StorageManager:
         Returns:
             True if model is in cache for this node, False otherwise
         """
-        # Check in-memory cache (updated after downloads in download_model_on_node)
         if model_name in self._cache_view.get(node_name, set()):
             logger.debug(
                 f"Model {model_name} verified in cache for {node_name}"
             )
             return True
 
-        # Also check database in case cache was cleared or we restarted
+        # Check database in case cache was cleared or we restarted
         node_storage = self.database.get_node_storage(node_name)
         if node_storage and model_name in node_storage.cached_models:
-            # Update in-memory cache from database
             if node_name not in self._cache_view:
                 self._cache_view[node_name] = set()
             self._cache_view[node_name].add(model_name)

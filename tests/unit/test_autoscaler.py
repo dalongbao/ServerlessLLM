@@ -253,13 +253,14 @@ class TestAutoscalerKeepAlive:
         self, autoscaler_with_metrics, database
     ):
         """Test that keep_alive prevents immediate scale down."""
-        # Create deployment with keep_alive
+        # Create deployment with keep_alive (must be active for scaling)
         deployment = database.create_deployment(
             model_name="keepalive-test",
             backend="vllm",
             min_replicas=0,
             max_replicas=2,
             keep_alive_seconds=60,
+            initial_status="active",
         )
         database.update_desired_replicas(deployment.id, 1)
 

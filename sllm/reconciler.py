@@ -45,6 +45,7 @@ import aiohttp
 
 from sllm.command_builder import build_instance_command
 from sllm.database import Database, Deployment
+from sllm.loading_queue import LoadingRequest, StorageLevel
 from sllm.logger import init_logger
 from sllm.pylet_client import InstanceInfo, PyletClient
 from sllm.storage_manager import StorageManager
@@ -110,6 +111,10 @@ class Reconciler:
     async def start(self):
         """Start the reconciler background loop."""
         self._session = aiohttp.ClientSession()
+        # Set executor for loading queue (GPU level = instance creation)
+        self.storage_manager.loading_queue.set_load_executor(
+            self._execute_instance_creation
+        )
         logger.info("Reconciler started")
 
     async def stop(self):
@@ -222,12 +227,22 @@ class Reconciler:
                     state.starting.remove(inst)
 
         # 3. Scale up if needed
-        current_or_starting = len(state.ready) + len(state.starting)
+        # Account for: ready instances + starting instances + pending queue requests
+        pending_in_queue = (
+            self.storage_manager.loading_queue.count_pending_gpu_requests(
+                deployment.model_name, deployment.backend
+            )
+        )
+        current_or_starting = (
+            len(state.ready) + len(state.starting) + pending_in_queue
+        )
         need = desired - current_or_starting
 
         if need > 0:
             logger.info(
-                f"[{deployment.id}] Scaling up: need {need} more instances"
+                f"[{deployment.id}] Scaling up: need {need} more instances "
+                f"(ready={len(state.ready)}, starting={len(state.starting)}, "
+                f"queued={pending_in_queue})"
             )
             for _ in range(need):
                 await self._create_instance(
@@ -331,7 +346,11 @@ class Reconciler:
         existing: List[InstanceInfo],
     ):
         """
-        Create a new instance for a deployment.
+        Queue instance creation for a deployment.
+
+        Selects the best node and enqueues a GPU-level request. The actual
+        instance creation happens in _execute_instance_creation() when the
+        queue processes the request.
 
         Args:
             deployment: Deployment to create instance for
@@ -340,13 +359,27 @@ class Reconciler:
         backend_config = deployment.backend_config or {}
         tp = backend_config.get("tensor_parallel_size", 1)
 
-        # Try to select best node considering load balancing
         node = await self.storage_manager.select_best_node(
             deployment.model_name, tp, existing
         )
 
         if not node:
-            # No node has the model with enough GPUs - try to download
+            # No node has the model with enough GPUs - check if already loading
+            # via the queue, otherwise start a download
+            workers = await self.pylet_client.get_online_workers()
+            for worker in workers:
+                if self.storage_manager.loading_queue.is_model_loading(
+                    deployment.model_name,
+                    StorageLevel.DISK,
+                    worker.worker_id,
+                ):
+                    logger.info(
+                        f"[{deployment.id}] Model loading on {worker.worker_id}, "
+                        "will retry next cycle"
+                    )
+                    return
+
+            # Not loading anywhere - try to start download via legacy path
             node = await self.storage_manager.ensure_model_on_node(
                 deployment.model_name, deployment.backend
             )
@@ -356,31 +389,62 @@ class Reconciler:
                 )
                 return
 
-        # Verify model is actually on node before scheduling (handles cache staleness)
-        model_verified = await self.storage_manager.verify_model_on_node(
-            node, deployment.model_name
+        await self.storage_manager.loading_queue.enqueue(
+            model_name=deployment.model_name,
+            backend=deployment.backend,
+            storage_level=StorageLevel.GPU,
+            node_name=node,
         )
-        if not model_verified:
-            logger.warning(
-                f"[{deployment.id}] Model verification failed on {node}, "
-                "will retry next cycle"
+        logger.debug(f"[{deployment.id}] Enqueued instance creation on {node}")
+
+    async def _execute_instance_creation(self, request: LoadingRequest) -> bool:
+        """
+        Execute instance creation from the loading queue.
+
+        This is the callback used by LoadingQueueManager for GPU-level requests.
+
+        Args:
+            request: LoadingRequest with model_name, backend, node_name
+
+        Returns:
+            True if instance was created successfully
+        """
+        deployment_id = f"{request.model_name}:{request.backend}"
+        deployment = self.database.get_deployment_by_id(deployment_id)
+        if not deployment:
+            logger.error(
+                f"Deployment {deployment_id} not found, cannot create instance"
             )
-            # Clear stale cache entry for this model on this node so next cycle can pick
-            # a different node or trigger a re-download without affecting other models
+            return False
+
+        if deployment.status != "active":
+            logger.warning(
+                f"Deployment {deployment_id} is {deployment.status}, skipping"
+            )
+            return False
+
+        node = request.node_name
+        if not await self.storage_manager.verify_model_on_node(
+            node, request.model_name
+        ):
+            logger.warning(
+                f"[{deployment_id}] Model verification failed on {node}"
+            )
             if node in self.storage_manager._cache_view:
                 self.storage_manager._cache_view[node].discard(
-                    deployment.model_name
+                    request.model_name
                 )
-            return
+            return False
 
-        # Ensure sllm-store is running on node
         store_endpoint = await self.storage_manager.ensure_store_on_node(node)
         if not store_endpoint:
-            logger.warning(
-                f"[{deployment.id}] Failed to start sllm-store on {node}"
+            logger.error(
+                f"[{deployment_id}] Failed to start sllm-store on {node}"
             )
-            return
+            return False
 
+        backend_config = deployment.backend_config or {}
+        tp = backend_config.get("tensor_parallel_size", 1)
         command, venv_path = build_instance_command(
             deployment, self.storage_path
         )
@@ -393,10 +457,10 @@ class Reconciler:
                 command=command,
                 name=instance_name,
                 target_worker=node,
-                gpu=tp,  # Let Pylet auto-allocate N GPUs
+                gpu=tp,
                 exclusive=True,
                 labels={
-                    "deployment_id": deployment.id,
+                    "deployment_id": deployment_id,
                     "type": "inference",
                     "node": node,
                 },
@@ -408,12 +472,14 @@ class Reconciler:
             )
 
             logger.info(
-                f"[{deployment.id}] Created instance {instance.instance_id} "
+                f"[{deployment_id}] Created instance {instance.instance_id} "
                 f"on {node} (requested {tp} GPUs)"
             )
+            return True
 
         except Exception as e:
-            logger.error(f"[{deployment.id}] Failed to create instance: {e}")
+            logger.error(f"[{deployment_id}] Failed to create instance: {e}")
+            return False
 
     async def _cleanup_instance(self, deployment_id: str, inst: InstanceInfo):
         """Clean up a failed or timed-out instance."""
@@ -437,13 +503,10 @@ class Reconciler:
         Removes endpoint from deployment_endpoints table first (Router stops
         sending new requests), waits briefly, then cancels the instance.
         """
-        # Remove from deployment_endpoints table (Router stops sending requests)
         if inst.endpoint:
             self.database.remove_deployment_endpoint(
                 deployment_id, inst.endpoint
             )
-
-            # Wait briefly for in-flight requests to complete
             await asyncio.sleep(2.0)
 
         try:
@@ -472,7 +535,6 @@ class Reconciler:
         Returns:
             Instances to remove
         """
-        # Get nodes with cached model
         nodes_with_cache = set(
             self.storage_manager.get_nodes_with_model(model_name)
         )

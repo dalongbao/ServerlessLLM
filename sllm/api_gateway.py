@@ -42,6 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from sllm.autoscaler import AutoScaler
+from sllm.command_builder import BUILDERS, check_backend_available
 from sllm.database import Database, Deployment
 from sllm.logger import init_logger
 from sllm.pylet_client import PyletClient
@@ -225,6 +226,11 @@ def create_app(
         if router:
             await router.drain(timeout=10.0)
             await router.stop()
+
+        storage_manager = getattr(app.state, "storage_manager", None)
+        if storage_manager:
+            await storage_manager.loading_queue.stop()
+
         logger.info("API Gateway shutdown")
 
     app = FastAPI(
@@ -309,13 +315,14 @@ def create_app(
         pylet: Optional[PyletClient] = request.app.state.pylet_client
 
         existing = db.get_deployment(model_name, backend)
-        model_cached = False
-        if storage_manager:
-            nodes_with_model = storage_manager.get_nodes_with_model(model_name)
-            model_cached = bool(nodes_with_model)
+        nodes_with_model = (
+            storage_manager.get_nodes_with_model(model_name)
+            if storage_manager
+            else []
+        )
 
         # Fast path: model is cached
-        if model_cached:
+        if nodes_with_model:
             if existing:
                 raise HTTPException(
                     status_code=409,
@@ -817,5 +824,46 @@ def create_app(
         )
 
         return {"status": "ok"}
+
+    # -------------------------------------------------------------------------
+    # Loading Queue Endpoints
+    # -------------------------------------------------------------------------
+
+    @app.get("/internal/loading-queue")
+    async def get_loading_queue_status(request: Request):
+        """Get loading queue status for all nodes.
+
+        Returns queue state including pending and active loads for each node.
+        """
+        storage_manager = getattr(request.app.state, "storage_manager", None)
+        if not storage_manager:
+            raise HTTPException(
+                status_code=503, detail="StorageManager not available"
+            )
+
+        return {"queues": storage_manager.loading_queue.get_all_queue_states()}
+
+    @app.get("/internal/loading-queue/{node_name}")
+    async def get_node_loading_queue(node_name: str, request: Request):
+        """Get loading queue status for a specific node.
+
+        Args:
+            node_name: Node to query
+
+        Returns queue state including pending and active loads.
+        """
+        storage_manager = getattr(request.app.state, "storage_manager", None)
+        if not storage_manager:
+            raise HTTPException(
+                status_code=503, detail="StorageManager not available"
+            )
+
+        state = storage_manager.loading_queue.get_node_queue_state(node_name)
+        if not state:
+            raise HTTPException(
+                status_code=404, detail=f"Node {node_name} not found in queue"
+            )
+
+        return state
 
     return app
